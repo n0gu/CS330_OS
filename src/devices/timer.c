@@ -19,6 +19,7 @@
 
 /* Number of timer ticks since OS booted. */
 static int64_t ticks;
+static int64_t target_tick;
 
 /* Number of loops per timer tick.
    Initialized by timer_calibrate(). */
@@ -94,13 +95,21 @@ timer_elapsed (int64_t then)
 
 /* Suspends execution for approximately TICKS timer ticks. */
 void
-timer_sleep (int64_t ticks) 
+timer_sleep (int64_t ticks)
 {
+  enum intr_level old_level = intr_disable();
   int64_t start = timer_ticks ();
+  struct thread *curr = thread_current();
 
+
+  curr->waketime = start + ticks;
+  list_push_back(&blocked_list, &curr->elem);
+  if(target_tick > start + ticks){
+    target_tick = start + ticks;
+  }
+  thread_block();
+  intr_set_level(old_level);
   ASSERT (intr_get_level () == INTR_ON);
-  while (timer_elapsed (start) < ticks) 
-    thread_yield ();
 }
 
 /* Suspends execution for approximately MS milliseconds. */
@@ -135,7 +144,18 @@ timer_print_stats (void)
 static void
 timer_interrupt (struct intr_frame *args UNUSED)
 {
+  struct list_elem *e;
+
   ticks++;
+  
+  if (ticks == target_tick){
+    for (e = list_begin (&blocked_list); e != list_end (&blocked_list); e = list_next (e)){
+      struct thread *f = list_entry (e, struct thread, elem);
+      if (f->waketime == target_tick){
+        thread_unblock(f);
+      }
+    }
+  }
   thread_tick ();
 }
 

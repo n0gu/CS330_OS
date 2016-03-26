@@ -95,6 +95,7 @@ thread_init (void)
 
   lock_init (&tid_lock);
   list_init (&ready_list);
+  list_init (&blocked_list);
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
@@ -220,6 +221,7 @@ thread_block (void)
 
   thread_current ()->status = THREAD_BLOCKED;
   schedule ();
+  ASSERT(0);
 }
 
 /* Transitions a blocked thread T to the ready-to-run state.

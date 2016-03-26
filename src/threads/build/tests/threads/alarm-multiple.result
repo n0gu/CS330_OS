@@ -1,0 +1,9 @@
+FAIL
+Kernel panic in run: PANIC at ../../threads/thread.c:224 in thread_block(): assertion `0' failed.
+Call stack: 0xc0107296 0xc01009af 0xc0102508 0xc0100798 0xc010007f
+Translation of call stack:
+0xc0107296: debug_panic (.../../lib/kernel/debug.c:34)
+0xc01009af: thread_unblock (..../../threads/thread.c:237)
+0xc0102508: sema_down (.../../../threads/synch.c:73)
+0xc0100798: thread_start (..../../threads/thread.c:122)
+0xc010007f: main (.../../../threads/init.c:108)

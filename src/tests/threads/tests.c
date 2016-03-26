@@ -9,7 +9,7 @@ struct test
     test_func *function;
   };
 
-static const struct test tests[] = 
+static const struct test tests[] =
   {
     {"alarm-single", test_alarm_single},
     {"alarm-multiple", test_alarm_multiple},
