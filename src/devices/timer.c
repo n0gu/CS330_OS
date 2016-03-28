@@ -19,7 +19,6 @@
 
 /* Number of timer ticks since OS booted. */
 static int64_t ticks;
-static int64_t target_tick;
 
 /* Number of loops per timer tick.
    Initialized by timer_calibrate(). */
@@ -29,6 +28,7 @@ static intr_handler_func timer_interrupt;
 static bool too_many_loops (unsigned loops);
 static void busy_wait (int64_t loops);
 static void real_time_sleep (int64_t num, int32_t denom);
+static bool waketime_less(struct list_elem *e, struct list_elem *min, void *aux);
 
 /* Sets up the 8254 Programmable Interval Timer (PIT) to
    interrupt PIT_FREQ times per second, and registers the
@@ -100,14 +100,17 @@ timer_sleep (int64_t ticks)
   enum intr_level old_level = intr_disable();
   int64_t start = timer_ticks ();
   struct thread *curr = thread_current();
-
-
-  curr->waketime = start + ticks;
-  list_push_back(&blocked_list, &curr->elem);
-  if(target_tick > start + ticks){
-    target_tick = start + ticks;
+  
+  if(ticks > 0){
+    curr->waketime = start + ticks;
+    if(list_empty(&sleeping_list)){
+      list_push_back(&sleeping_list, &curr->elem);
+    }
+    else{
+      list_insert_ordered(&sleeping_list, &curr->elem, waketime_less, NULL);
+    }
+    thread_block();
   }
-  thread_block();
   intr_set_level(old_level);
   ASSERT (intr_get_level () == INTR_ON);
 }
@@ -144,19 +147,20 @@ timer_print_stats (void)
 static void
 timer_interrupt (struct intr_frame *args UNUSED)
 {
-  struct list_elem *e;
-
   ticks++;
-  
-  if (ticks == target_tick){
-    for (e = list_begin (&blocked_list); e != list_end (&blocked_list); e = list_next (e)){
-      struct thread *f = list_entry (e, struct thread, elem);
-      if (f->waketime == target_tick){
-        thread_unblock(f);
-      }
-    }
+  thread_tick();
+
+  while (!(list_empty(&sleeping_list)) && list_entry(list_begin(&sleeping_list), struct thread, elem)->waketime == ticks){
+    struct list_elem *e = list_pop_front(&sleeping_list);
+    struct thread *f = list_entry(e, struct thread, elem);
+    thread_unblock(f);
   }
-  thread_tick ();
+}
+
+static bool 
+waketime_less(struct list_elem *e, struct list_elem *min, void *aux)
+{
+  return list_entry(e, struct thread, elem)->waketime < list_entry(min, struct thread, elem)->waketime;
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer
