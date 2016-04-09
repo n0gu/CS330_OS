@@ -88,12 +88,9 @@ struct thread
     char name[16];                      /* Name (for debugging purposes). */
     uint8_t *stack;                     /* Saved stack pointer. */
     int priority;                       /* Priority. */
-    int eff_priority;
-    int64_t waketime;
+
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
-    struct lock *waiting_lock;
-    struct list ac_locks;
 
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
@@ -136,10 +133,4 @@ void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
-int select_eff_priority(struct thread *t);
-bool priority_less(struct list_elem *e, struct list_elem *min, void *aux);
-bool priority_greater(struct list_elem *e, struct list_elem *min, void *aux);
-
-
-struct list sleeping_list;
 #endif /* threads/thread.h */

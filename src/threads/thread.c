@@ -95,7 +95,6 @@ thread_init (void)
 
   lock_init (&tid_lock);
   list_init (&ready_list);
-  list_init (&sleeping_list);
 
   /* Set up a thread structure for the running thread. */
   initial_thread = running_thread ();
@@ -203,7 +202,7 @@ thread_create (const char *name, int priority,
 
   /* Add to run queue. */
   thread_unblock (t);
-  thread_yield();
+
   return tid;
 }
 
@@ -315,51 +314,18 @@ thread_yield (void)
   intr_set_level (old_level);
 }
 
-int
-select_eff_priority(struct thread *t)
-{
-  if(list_empty(&t->ac_locks)){
-    return t->priority;
-  }
-  else{
-    struct list_elem *e;
-    struct lock *lock;
-    int max = -1;
-    int lock_eff_priority;
-
-    if(!list_empty(&t->ac_locks)){
-      for(e = list_begin(&t->ac_locks); e != list_end(&t->ac_locks); e = list_next(e)){
-        lock = list_entry(e, struct lock, elem);
-        lock_eff_priority = lock_get_eff_priority(lock);
-        if(lock_eff_priority > max){
-          max = lock_eff_priority;
-        }
-      }
-      if(max > t->priority){
-        return max;
-      }
-      else{
-        return t->priority;
-      }
-    }
-  }
-}
-
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
 thread_set_priority (int new_priority) 
 {
-  struct  thread *t = thread_current();
-  t->priority = new_priority;
-  t->eff_priority = select_eff_priority(t); 
-  thread_yield();
+  thread_current ()->priority = new_priority;
 }
 
 /* Returns the current thread's priority. */
 int
 thread_get_priority (void) 
 {
-  return thread_current ()->eff_priority;
+  return thread_current ()->priority;
 }
 
 /* Sets the current thread's nice value to NICE. */
@@ -477,8 +443,6 @@ init_thread (struct thread *t, const char *name, int priority)
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
   t->priority = priority;
-  t->eff_priority = priority;
-  list_init(&t->ac_locks);
   t->magic = THREAD_MAGIC;
 }
 
@@ -505,38 +469,9 @@ next_thread_to_run (void)
 {
   if (list_empty (&ready_list))
     return idle_thread;
-  else{
-    struct list_elem *max_pri = list_max(&ready_list, priority_less, NULL);
-    list_remove(max_pri);
-    return list_entry(max_pri, struct thread, elem);
-  }
+  else
+    return list_entry (list_pop_front (&ready_list), struct thread, elem);
 }
-
-bool
-priority_less(struct list_elem *e, struct list_elem *min, void *aux)
-{
-  return list_entry(e, struct thread, elem)->eff_priority < list_entry(min, struct thread, elem)->eff_priority;
-}
-
-bool
-priority_greater(struct list_elem *e, struct list_elem *min, void *aux)
-{
-  return list_entry(e, struct thread, elem)->eff_priority > list_entry(min, struct thread, elem)->eff_priority;
-}
-
-/*
-bool
-lock_priority_less(struct list_elem *e, struct list_elem *min, void *aux)
-{
-  return list_entry(e, struct thread, lock_elem)->eff_priority < list_entry(min, struct thread, lock_elem)->eff_priority;
-}
-
-bool
-lock_priority_greater(struct list_elem *e, struct list_elem *min, void *aux)
-{
-  return !list_entry(e, struct thread, lock_elem)->eff_priority < list_entry(min, struct thread, lock_elem)->eff_priority;
-}
-*/
 
 /* Completes a thread switch by activating the new thread's page
    tables, and, if the previous thread is dying, destroying it.
@@ -597,7 +532,7 @@ schedule (void)
   struct thread *curr = running_thread ();
   struct thread *next = next_thread_to_run ();
   struct thread *prev = NULL;
-  
+
   ASSERT (intr_get_level () == INTR_OFF);
   ASSERT (curr->status != THREAD_RUNNING);
   ASSERT (is_thread (next));
