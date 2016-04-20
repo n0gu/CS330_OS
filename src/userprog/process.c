@@ -17,55 +17,79 @@
 #include "threads/palloc.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
+static void setup_args(void **esp, char *file_name, char *args);
 
 /* Starts a new thread running a user program loaded from
    FILENAME.  The new thread may be scheduled (and may even exit)
    before process_execute() returns.  Returns the new process's
    thread id, or TID_ERROR if the thread cannot be created. */
 tid_t
-process_execute (const char *file_name) 
+process_execute (const char *cmd_line) 
 {
-  char *fn_copy;
+  char *fn_copy, *fn_copy2, *save_ptr;
   tid_t tid;
+  struct thread *curr = thread_current();
 
   /* Make a copy of FILE_NAME.
      Otherwise there's a race between the caller and load(). */
   fn_copy = palloc_get_page (0);
-  if (fn_copy == NULL)
+  fn_copy2 = (char *)malloc(128);
+  if (fn_copy == NULL){
+    free(fn_copy2);
     return TID_ERROR;
-  strlcpy (fn_copy, file_name, PGSIZE);
+  }
+  strlcpy (fn_copy, cmd_line, PGSIZE);
+  strlcpy (fn_copy2, cmd_line, 128);
+  strtok_r(fn_copy2, " ", &save_ptr);
 
   /* Create a new thread to execute FILE_NAME. */
-  tid = thread_create (file_name, PRI_DEFAULT, start_process, fn_copy);
+  tid = thread_create (fn_copy2, PRI_DEFAULT, start_process, fn_copy);
+  free(fn_copy2);
+
+  sema_down(&curr->child_create_fin);
   if (tid == TID_ERROR)
     palloc_free_page (fn_copy); 
+  if (curr->child_create_status == -1){
+    tid = process_wait(tid);
+  }
   return tid;
 }
 
 /* A thread function that loads a user process and makes it start
    running. */
 static void
-start_process (void *f_name)
+start_process (void *cmd_line)
 {
-  char *file_name = f_name;
   struct intr_frame if_;
   bool success;
+  struct thread *curr = thread_current();
+  //printf("@%s : start_process (expected to be child's.)\n", curr->name);
+  //printf("@%s : my parent is %s.\n", curr->name, curr->parent->name);
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
   if_.gs = if_.fs = if_.es = if_.ds = if_.ss = SEL_UDSEG;
   if_.cs = SEL_UCSEG;
   if_.eflags = FLAG_IF | FLAG_MBS;
-  success = load (file_name, &if_.eip, &if_.esp);
+  success = load (cmd_line, &if_.eip, &if_.esp);
 
   /* If load failed, quit. */
-  palloc_free_page (file_name);
-  if (!success) 
+  if (!success){
+    palloc_free_page(cmd_line);
+    curr->parent->child_create_status = -1;
+    curr->exit_status = -1;
+    sema_up(&curr->parent->child_create_fin);
     thread_exit ();
-
+  }
+  /* else re-open it, and deny writes. */
+  else{
+    palloc_free_page(cmd_line);
+    sema_up(&curr->parent->child_create_fin);
+  }
   /* Start the user process by simulating a return from an
      interrupt, implemented by intr_exit (in
      threads/intr-stubs.S).  Because intr_exit takes all of its
@@ -75,6 +99,49 @@ start_process (void *f_name)
   asm volatile ("movl %0, %%esp; jmp intr_exit" : : "g" (&if_) : "memory");
   NOT_REACHED ();
 }
+
+static void
+setup_args(void **esp, char *file_name, char *args)
+{
+  char* argv_real[128];
+  char* argv_stack[128];
+  int l, i;
+  int count = 0;
+  char *token, *rest_args;
+
+  argv_real[0] = file_name;
+  count ++;
+
+  for(token = strtok_r(args, " ", &rest_args); token != NULL; token = strtok_r(NULL, " ", &rest_args))
+  {
+    argv_real[count] = token;
+    count ++;
+  }
+
+  for(i = count - 1; i >= 0; i--)
+  {
+    l = strlen(argv_real[i]) + 1;
+    *esp -= l;
+    strlcpy(*esp, argv_real[i], l);
+    argv_stack[i] = *esp;
+  }
+  argv_stack[count] = 0;
+
+  *(char *)esp = (uint32_t)(*esp) & 0xfffffffc;
+
+  for(i = count; i >= 0; i--){
+    *(char *)esp -= 4;
+    *(char **)(*esp) = argv_stack[i];
+  }
+  *esp -= 8;
+  *(int32_t *)(*esp) = count; // argc
+  *(char **)(*esp + 4) = (char *)(*esp) + 8; // argv
+
+  *esp -= 4;
+  *(int32_t *)*esp = 0;
+
+}
+
 
 /* This is 2016 spring cs330 skeleton code */
 
@@ -88,9 +155,22 @@ start_process (void *f_name)
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int
-process_wait (tid_t child_tid UNUSED) 
+process_wait (tid_t child_tid)
 {
-  return -1;
+  int status;
+  struct thread *curr = thread_current();
+  struct thread *deadchild = lookup_child(&curr->child, child_tid);
+
+  if(deadchild){
+    sema_down(&deadchild->exit_fin); // high possibility of race condition. recommend to move this semaphore into child.
+    list_remove(&deadchild->child_elem);
+    status = deadchild->exit_status;
+    sema_up(&deadchild->parent_reap_fin);
+    return status;
+  }
+  else{
+    return -1;
+  }
 }
 
 /* Free the current process's resources. */
@@ -98,8 +178,17 @@ void
 process_exit (void)
 {
   struct thread *curr = thread_current ();
+  char *t_name = curr->name;
   uint32_t *pd;
+  int status = curr->exit_status;
 
+  file_close(curr->exec);
+  while(!list_empty(&curr->open_files)){
+    struct list_elem *e = list_pop_front(&curr->open_files);
+    struct thread_filesys *tf = list_entry(e, struct thread_filesys, elem);
+    file_close(tf->file);
+    free(tf);
+  }
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
   pd = curr->pagedir;
@@ -116,11 +205,14 @@ process_exit (void)
       pagedir_activate (NULL);
       pagedir_destroy (pd);
     }
+  printf("%s: exit(%d)\n", t_name, status);
+  sema_up(&curr->exit_fin);
+  sema_down(&curr->parent_reap_fin);
 }
 
 /* Sets up the CPU for running user code in the current
    thread.
-   This function is called on every context switch. */
+  This function is called on every context switch. */
 void
 process_activate (void)
 {
@@ -133,7 +225,7 @@ process_activate (void)
      interrupts. */
   tss_update ();
 }
-
+
 /* We load ELF binaries.  The following definitions are taken
    from the ELF specification, [ELF1], more-or-less verbatim.  */
 
@@ -208,11 +300,13 @@ static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
    and its initial stack pointer into *ESP.
    Returns true if successful, false otherwise. */
 bool
-load (const char *file_name, void (**eip) (void), void **esp) 
+load (const char *cmd_line, void (**eip) (void), void **esp) 
 {
   struct thread *t = thread_current ();
   struct Elf32_Ehdr ehdr;
   struct file *file = NULL;
+  char *args;
+  char *file_name = strtok_r(cmd_line, " ", &args);
   off_t file_ofs;
   bool success = false;
   int i;
@@ -225,6 +319,7 @@ load (const char *file_name, void (**eip) (void), void **esp)
 
   /* Open executable file. */
   file = filesys_open (file_name);
+  t->exec = file;
   if (file == NULL) 
     {
       printf ("load: %s: open failed\n", file_name);
@@ -306,15 +401,16 @@ load (const char *file_name, void (**eip) (void), void **esp)
   /* Set up stack. */
   if (!setup_stack (esp))
     goto done;
+  setup_args(esp, file_name, args);
 
   /* Start address. */
   *eip = (void (*) (void)) ehdr.e_entry;
 
   success = true;
 
+  file_deny_write(file);
  done:
   /* We arrive here whether the load is successful or not. */
-  file_close (file);
   return success;
 }
 

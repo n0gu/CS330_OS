@@ -169,6 +169,7 @@ tid_t
 thread_create (const char *name, int priority,
                thread_func *function, void *aux) 
 {
+  struct thread *curr = thread_current();
   struct thread *t;
   struct kernel_thread_frame *kf;
   struct switch_entry_frame *ef;
@@ -184,6 +185,9 @@ thread_create (const char *name, int priority,
 
   /* Initialize thread. */
   init_thread (t, name, priority);
+  list_push_back(&curr->child, &t->child_elem);
+  t->parent = curr;
+  curr->child_create_status = 1;
   tid = t->tid = allocate_tid ();
 
   /* Stack frame for kernel_thread(). */
@@ -439,6 +443,13 @@ init_thread (struct thread *t, const char *name, int priority)
   ASSERT (name != NULL);
 
   memset (t, 0, sizeof *t);
+  t->maxfd = 1;
+  t->exit_status = 0;
+  sema_init(&t->child_create_fin, 0);
+  sema_init(&t->exit_fin, 0);
+  sema_init(&t->parent_reap_fin, 0);
+  list_init(&t->child);
+  list_init(&t->open_files);
   t->status = THREAD_BLOCKED;
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;
@@ -559,3 +570,20 @@ allocate_tid (void)
 /* Offset of `stack' member within `struct thread'.
    Used by switch.S, which can't figure it out on its own. */
 uint32_t thread_stack_ofs = offsetof (struct thread, stack);
+
+struct thread *
+lookup_child(struct list *pl, int tid)
+{
+  struct list_elem *e;
+  struct thread *t;
+  for(e = list_begin(pl); e != list_end(pl); e = list_next(e)){
+    
+    //printf("lookup_child: 0x%8x\n", e);
+
+    t = list_entry(e, struct thread, child_elem);
+    if(t->tid == tid){
+      return t;
+    }
+  }
+  return NULL;
+}

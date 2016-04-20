@@ -4,6 +4,7 @@
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
+#include "threads/synch.h"
 
 /* States in a thread's life cycle. */
 enum thread_status
@@ -96,14 +97,33 @@ struct thread
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
 #endif
-
+    int maxfd;
+    struct list child;
+    struct list open_files;
+    struct list_elem child_elem;
+    struct semaphore child_create_fin;
+    struct semaphore exit_fin;
+    struct semaphore parent_reap_fin;
+    struct thread *parent;
+    struct file *exec;
+    int child_create_status;
+    int exit_status;
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
   };
 
+struct thread_filesys
+  {
+    int fd;
+    struct file *file;
+    struct list_elem elem;
+  };
+
+
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
    Controlled by kernel command-line option "-o mlfqs". */
+
 extern bool thread_mlfqs;
 
 void thread_init (void);
@@ -122,7 +142,7 @@ struct thread *thread_current (void);
 tid_t thread_tid (void);
 const char *thread_name (void);
 
-void thread_exit (void) NO_RETURN;
+void thread_exit (void);
 void thread_yield (void);
 
 int thread_get_priority (void);
@@ -132,5 +152,7 @@ int thread_get_nice (void);
 void thread_set_nice (int);
 int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
+
+struct thread *lookup_child(struct list *pl, int tid);
 
 #endif /* threads/thread.h */

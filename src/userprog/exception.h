@@ -8,5 +8,6 @@
 
 void exception_init (void);
 void exception_print_stats (void);
+void page_fault (struct intr_frame *);
 
 #endif /* userprog/exception.h */
