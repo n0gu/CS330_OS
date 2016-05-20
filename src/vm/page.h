@@ -7,7 +7,10 @@
 enum spte_status
   {
     P_WRITABLE = 1,
-    P_INSWAP = 2
+    P_INSWAP = 2,
+    P_LAZY = 4,
+    P_MMAP = 8,
+    P_DIRTY = 16
   };
 
 struct spte
@@ -17,6 +20,12 @@ struct spte
     size_t swap_addr;
     enum spte_status status;
     struct thread *thread;
+
+    /* for implementing lazy loading */
+    struct file *file;
+    int ofs;
+    uint32_t read_bytes;
+
     struct hash_elem hash_elem;
   };
 

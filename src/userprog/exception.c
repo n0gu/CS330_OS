@@ -2,6 +2,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include "userprog/gdt.h"
+#include "userprog/process.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "threads/vaddr.h"
@@ -128,7 +129,7 @@ page_fault (struct intr_frame *f)
   bool user;         /* True: access by user, false: access by kernel. */
   void *fault_addr;  /* Fault address. */
   void *esp;
-  int tid = thread_current()->tid;
+  int status, tid = thread_current()->tid;
   /* Obtain faulting address, the virtual address that was
      accessed to cause the fault.  It may point to code or to
      data.  It is not necessarily the address of the instruction
@@ -167,15 +168,24 @@ page_fault (struct intr_frame *f)
     frame_lock_ac();
     struct spte *spte = spt_find(pg_round_down(fault_addr));
     if(spte){
-      ASSERT(spte_status(spte) & P_INSWAP);
-      swap_in(spte);
-      frame_lock_rl();
-      return;
+      status = spte->status;
+      if(status & P_INSWAP){
+        swap_in(spte);
+        frame_lock_rl();
+        return;
+      }
+      if(status & P_LAZY){
+        if(!load_lazy(spte))
+          PANIC("LAZY LOAD FAIL");
+        frame_lock_rl();
+        return;
+      }
+      NOT_REACHED();
     }
     else{
       if(fault_addr >= esp - 32 && fault_addr < PHYS_BASE){
         if(!grow_stack(pg_round_down(fault_addr)))
-            PANIC("stack growth fail :(");
+            PANIC("STACK GROWTH FAIL");
         frame_lock_rl();
         return;
       }

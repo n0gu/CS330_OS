@@ -488,7 +488,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
   ASSERT (pg_ofs (upage) == 0);
   ASSERT (ofs % PGSIZE == 0);
 
-  file_seek (file, ofs);
+//  file_seek (file, ofs);
   while (read_bytes > 0 || zero_bytes > 0) 
     {
       /* Do calculate how to fill this page.
@@ -499,11 +499,11 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 
       /* Get a page of memory. */
 
-      frame_lock_ac();
+/*      frame_lock_ac();
       struct spte *p = alloc_user_page(upage, false, writable);
       uint8_t *kpage = p->frame_entry->frame_addr;
 
-      /* Load this page. */
+      /* Load this page. *
       if (file_read (file, kpage, page_read_bytes) != (int) page_read_bytes)
         {
           palloc_free_page (kpage);
@@ -514,7 +514,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
         }
       memset (kpage + page_read_bytes, 0, page_zero_bytes);
 
-      /* Add the page to the process's address space. */
+      /* Add the page to the process's address space. *
       if (!install_page (upage, kpage, writable)) 
         {
           palloc_free_page (kpage);
@@ -523,12 +523,18 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
           frame_lock_rl();
           return false; 
         }
-      frame_lock_rl();
+      frame_lock_rl(); */
+
+      struct spte *lazy_spte = spte_create(upage ,NULL, P_LAZY | writable);
+      lazy_spte->file = file;
+      lazy_spte->ofs = ofs;
+      lazy_spte->read_bytes = page_read_bytes;
 
       /* Advance. */
       read_bytes -= page_read_bytes;
       zero_bytes -= page_zero_bytes;
       upage += PGSIZE;
+      ofs += PGSIZE;
     }
   return true;
 }
@@ -595,6 +601,38 @@ alloc_user_page(void *upage, bool zero, bool writable)
   struct spte *new_spte = spte_create(upage, NULL, writable);
   struct frame_entry *new_fe = frame_alloc(new_spte, zero);
   return new_spte;
+}
+
+bool
+load_lazy(struct spte *spte)
+{
+  ASSERT(frame_lock_held_by_curr());
+  ASSERT(spte->status & P_LAZY);
+  struct frame_entry *f = frame_alloc(spte, true);
+  uint8_t *upage = spte->page_addr;
+  uint8_t *kpage = f->frame_addr;
+
+  file_seek(spte->file, spte->ofs);
+  /* Load this page. */
+  if (file_read (spte->file, kpage, spte->read_bytes) != (int) spte->read_bytes)
+  {
+    palloc_free_page (kpage);
+    puts("destroy");
+    destroy_both_entry(spte);
+    return false;
+  }
+
+  /* Add the page to the process's address space. */
+  if (!install_page (upage, kpage, spte->status & P_WRITABLE))
+  {
+    palloc_free_page (kpage);
+    puts("failed install");
+    destroy_both_entry(spte);
+    return false;
+  }
+
+  spte_unmark(spte, P_LAZY);
+  return true;
 }
 
 void

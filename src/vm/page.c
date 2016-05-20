@@ -104,14 +104,16 @@ spt_free(struct hash_elem *elem, void *aux)
   struct spte *p = hash_entry(elem, struct spte, hash_elem);
   int status = p->status;
 
-  if(status & P_INSWAP){
-    ASSERT(p->frame_entry == NULL);
-    swap_free(p->swap_addr);
-  }
-  else{
-    ASSERT(p->frame_entry != NULL);
-    ASSERT(p->frame_entry->spte == p);
-    frame_free(p->frame_entry);
+  if(!(status & P_LAZY)){
+    if(status & P_INSWAP){
+      ASSERT(p->frame_entry == NULL);
+      swap_free(p->swap_addr);
+    }
+    else{
+      ASSERT(p->frame_entry != NULL);
+      ASSERT(p->frame_entry->spte == p);
+      frame_free(p->frame_entry);
+    }
   }
   free(p);
 }
