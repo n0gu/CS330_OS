@@ -18,6 +18,8 @@
 #include "threads/thread.h"
 #include "threads/vaddr.h"
 #include "threads/malloc.h"
+#include "vm/frame.h"
+#include "vm/page.h"
 
 static thread_func start_process NO_RETURN;
 static bool load (const char *cmdline, void (**eip) (void), void **esp);
@@ -67,8 +69,6 @@ start_process (void *cmd_line)
   struct intr_frame if_;
   bool success;
   struct thread *curr = thread_current();
-  //printf("@%s : start_process (expected to be child's.)\n", curr->name);
-  //printf("@%s : my parent is %s.\n", curr->name, curr->parent->name);
 
   /* Initialize interrupt frame and load executable. */
   memset (&if_, 0, sizeof if_);
@@ -191,6 +191,9 @@ process_exit (void)
   }
   /* Destroy the current process's page directory and switch back
      to the kernel-only page directory. */
+  frame_lock_ac();
+  spt_destroy();
+  frame_lock_rl();
   pd = curr->pagedir;
   if (pd != NULL) 
     {
@@ -313,6 +316,7 @@ load (const char *cmd_line, void (**eip) (void), void **esp)
 
   /* Allocate and activate page directory. */
   t->pagedir = pagedir_create ();
+  spt_init();
   if (t->pagedir == NULL) 
     goto done;
   process_activate ();
@@ -416,7 +420,6 @@ load (const char *cmd_line, void (**eip) (void), void **esp)
 
 /* load() helpers. */
 
-static bool install_page (void *upage, void *kpage, bool writable);
 
 /* Checks whether PHDR describes a valid, loadable segment in
    FILE and returns true if so, false otherwise. */
@@ -495,14 +498,18 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
       size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
       /* Get a page of memory. */
-      uint8_t *kpage = palloc_get_page (PAL_USER);
-      if (kpage == NULL)
-        return false;
+
+      frame_lock_ac();
+      struct spte *p = alloc_user_page(upage, false, writable);
+      uint8_t *kpage = p->frame_entry->frame_addr;
 
       /* Load this page. */
       if (file_read (file, kpage, page_read_bytes) != (int) page_read_bytes)
         {
           palloc_free_page (kpage);
+          puts("destroy");
+          destroy_both_entry(p);
+          frame_lock_rl();
           return false; 
         }
       memset (kpage + page_read_bytes, 0, page_zero_bytes);
@@ -511,8 +518,12 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
       if (!install_page (upage, kpage, writable)) 
         {
           palloc_free_page (kpage);
+          puts("failded install");
+          destroy_both_entry(p);
+          frame_lock_rl();
           return false; 
         }
+      frame_lock_rl();
 
       /* Advance. */
       read_bytes -= page_read_bytes;
@@ -527,18 +538,25 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 static bool
 setup_stack (void **esp) 
 {
+  struct spte *p;
   uint8_t *kpage;
   bool success = false;
 
-  kpage = palloc_get_page (PAL_USER | PAL_ZERO);
+  frame_lock_ac();
+  p = alloc_user_page(((uint8_t *)PHYS_BASE) - PGSIZE, true, true);
+  kpage = p->frame_entry->frame_addr;
   if (kpage != NULL) 
     {
       success = install_page (((uint8_t *) PHYS_BASE) - PGSIZE, kpage, true);
       if (success)
         *esp = PHYS_BASE;
-      else
+      else{
+        printf("SETUP STACK_install page FAIL\n");
         palloc_free_page (kpage);
+        destroy_both_entry(p);
+      }
     }
+  frame_lock_rl();
   return success;
 }
 
@@ -551,7 +569,7 @@ setup_stack (void **esp)
    with palloc_get_page().
    Returns true on success, false if UPAGE is already mapped or
    if memory allocation fails. */
-static bool
+bool
 install_page (void *upage, void *kpage, bool writable)
 {
   struct thread *t = thread_current ();
@@ -560,4 +578,28 @@ install_page (void *upage, void *kpage, bool writable)
      address, then map our page there. */
   return (pagedir_get_page (t->pagedir, upage) == NULL
           && pagedir_set_page (t->pagedir, upage, kpage, writable));
+}
+
+bool
+grow_stack(void *fault_addr)
+{
+  ASSERT(frame_lock_held_by_curr());
+  struct spte *spte = alloc_user_page(pg_round_down(fault_addr), true, true);
+  return install_page(spte->page_addr, spte->frame_entry->frame_addr, true);
+}
+
+struct spte *
+alloc_user_page(void *upage, bool zero, bool writable)
+{
+  ASSERT(frame_lock_held_by_curr());
+  struct spte *new_spte = spte_create(upage, NULL, writable);
+  struct frame_entry *new_fe = frame_alloc(new_spte, zero);
+  return new_spte;
+}
+
+void
+destroy_both_entry(struct spte *spte)
+{
+  frame_free(spte->frame_entry);
+  spte_free(spte);
 }

@@ -4,6 +4,8 @@
 #include "userprog/gdt.h"
 #include "threads/interrupt.h"
 #include "threads/thread.h"
+#include "threads/vaddr.h"
+#include "vm/page.h"
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
@@ -125,7 +127,8 @@ page_fault (struct intr_frame *f)
   bool write;        /* True: access was write, false: access was read. */
   bool user;         /* True: access by user, false: access by kernel. */
   void *fault_addr;  /* Fault address. */
-
+  void *esp;
+  int tid = thread_current()->tid;
   /* Obtain faulting address, the virtual address that was
      accessed to cause the fault.  It may point to code or to
      data.  It is not necessarily the address of the instruction
@@ -157,6 +160,29 @@ page_fault (struct intr_frame *f)
           user ? "user" : "kernel");
   kill (f); */
 
+
+  esp = user ? f->esp : thread_current()->syscall_esp;
+
+  if(not_present){
+    frame_lock_ac();
+    struct spte *spte = spt_find(pg_round_down(fault_addr));
+    if(spte){
+      ASSERT(spte_status(spte) & P_INSWAP);
+      swap_in(spte);
+      frame_lock_rl();
+      return;
+    }
+    else{
+      if(fault_addr >= esp - 32 && fault_addr < PHYS_BASE){
+        if(!grow_stack(pg_round_down(fault_addr)))
+            PANIC("stack growth fail :(");
+        frame_lock_rl();
+        return;
+      }
+    }
+    frame_lock_rl();
+  }
+//  printf("%d@page_fault: not any special case _ exit(-1)\n", tid);
   thread_current()->exit_status = -1;
   thread_exit();
 }

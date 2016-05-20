@@ -3,6 +3,7 @@
 
 #include <debug.h>
 #include <list.h>
+#include <hash.h>
 #include <stdint.h>
 #include "threads/synch.h"
 
@@ -96,7 +97,6 @@ struct thread
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir;                  /* Page directory. */
-#endif
     int maxfd;
     struct list child;
     struct list open_files;
@@ -108,6 +108,12 @@ struct thread
     struct file *exec;
     int child_create_status;
     int exit_status;
+    void *syscall_esp;
+#endif
+
+#ifdef VM
+    struct hash spt;
+#endif
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
   };

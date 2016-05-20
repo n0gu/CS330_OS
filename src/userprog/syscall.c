@@ -7,10 +7,13 @@
 #include "threads/thread.h"
 #include "threads/init.h"
 #include "threads/vaddr.h"
+#include "threads/synch.h"
+#include "threads/malloc.h"
 #include "lib/user/syscall.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
-#include "threads/synch.h"
+#include "vm/frame.h"
+#include "vm/page.h"
 
 struct lock file_lock;
 static inline uint32_t nth_arg(struct intr_frame *f, int n);
@@ -18,21 +21,23 @@ static inline bool is_valid(void *pointer);
 static inline void bad_esp_filter(struct intr_frame *f, int num_of_arg);
 
 static void syscall_handler (struct intr_frame *);
-static void sys_halt(struct intr_frame *);
-static void sys_exit(struct intr_frame *);
-static void sys_exec(struct intr_frame *);
-static void sys_wait(struct intr_frame *);
-static void sys_create(struct intr_frame *);
-static void sys_remove(struct intr_frame *);
-static void sys_open(struct intr_frame *);
-static void sys_filesize(struct intr_frame *);
-static void sys_read(struct intr_frame *);
-static void sys_write(struct intr_frame *);
-static void sys_seek(struct intr_frame *);
-static void sys_tell(struct intr_frame *);
-static void sys_close(struct intr_frame *);
-static struct thread_filesys *lookup_fd(struct thread *t, int fd);
-
+static void sys_halt(void);
+static void sys_exit(int);
+static pid_t sys_exec(const char *);
+static int sys_wait(pid_t);
+static bool sys_create(const char *, unsigned);
+static bool sys_remove(const char *);
+static int sys_open(const char *);
+static int sys_filesize(int);
+static int sys_read(int, void *, unsigned);
+static int sys_write(int, const void *, unsigned);
+static void sys_seek(int, unsigned);
+static unsigned sys_tell(int);
+static void sys_close(int);
+static mapid_t sys_mmap(int, void *);
+static void sys_munmap(mapid_t);
+static struct thread_filesys *lookup_fd(struct thread *, int);
+static struct thread_mmap *lookup_mapid(struct thread *, mapid_t);
 void
 syscall_init (void)
 {
@@ -41,63 +46,115 @@ syscall_init (void)
 }
 
 static void
-syscall_handler (struct intr_frame *f) 
+syscall_handler (struct intr_frame *f)
 {
+  int status, fd;
+  char *cmd_line, *file;
+  pid_t pid;
+  mapid_t mapid;
+  unsigned size, position;
+  void *buffer;
 
-  int syscall_num = *(int32_t **)(f->esp);
+  int syscall_num = *(int32_t *)(f->esp);
+  thread_current()->syscall_esp = f->esp;
 
   switch(syscall_num)
   {
     case SYS_HALT:
-      sys_halt(f);
+      sys_halt();
       break;
 
     case SYS_EXIT:
-      sys_exit(f);
+      bad_esp_filter(f, 1);
+      status = nth_arg(f, 1);
+      sys_exit(status);
       break;
 
     case SYS_EXEC:
-      sys_exec(f);
+      bad_esp_filter(f, 1);
+      cmd_line = (char *)nth_arg(f, 1);
+      f->eax = sys_exec(cmd_line);
       break;
 
     case SYS_WAIT:
-      sys_wait(f);
+      bad_esp_filter(f, 1);
+      pid = nth_arg(f, 1);
+      f->eax = sys_wait(pid);
       break;
 
     case SYS_CREATE:
-      sys_create(f);
+      bad_esp_filter(f, 2);
+      file = (char *)nth_arg(f, 1);
+      size = nth_arg(f, 2);
+      f->eax = sys_create(file, size);
       break;
 
     case SYS_REMOVE:
-      sys_remove(f);
+      bad_esp_filter(f, 1);
+      file = (char *)nth_arg(f, 1);
+      f->eax = sys_remove(file);
       break;
 
     case SYS_OPEN:
-      sys_open(f);
+      bad_esp_filter(f, 1);
+      file = (char *)nth_arg(f, 1);
+      f->eax = sys_open(file);
       break;
 
     case SYS_FILESIZE:
-      sys_filesize(f);
+      bad_esp_filter(f, 1);
+      fd = nth_arg(f, 1);
+      f->eax = sys_filesize(fd);
       break;
 
     case SYS_READ:
-      sys_read(f);
+      bad_esp_filter(f, 3);
+      fd = nth_arg(f, 1);
+      buffer = nth_arg(f, 2);
+      size = nth_arg(f, 3);
+      f->eax = sys_read(fd, buffer, size);
       break;
 
     case SYS_WRITE:
-      sys_write(f);
+      bad_esp_filter(f, 3);
+      fd = nth_arg(f, 1);
+      buffer = nth_arg(f, 2);
+      size = nth_arg(f, 3);
+      f->eax = sys_write(fd, buffer, size);
       break;
 
     case SYS_SEEK:
-      sys_seek(f);
+      bad_esp_filter(f, 2);
+      fd = nth_arg(f, 1);
+      position = nth_arg(f, 2);
+      sys_seek(fd, position);
       break;
 
     case SYS_TELL:
-      sys_tell(f);
+      bad_esp_filter(f, 1);
+      fd = nth_arg(f, 1);
+      f->eax = sys_tell(fd);
       break;
 
     case SYS_CLOSE:
-      sys_close(f);
+      bad_esp_filter(f, 1);
+      fd = nth_arg(f, 1);
+      sys_close(fd);
+      break;
+
+    case SYS_MMAP:
+      ASSERT(0);
+      bad_esp_filter(f, 2);
+      fd = nth_arg(f, 1);
+      buffer = nth_arg(f, 2);
+      sys_mmap(fd, buffer);
+      break;
+
+    case SYS_MUNMAP:
+      ASSERT(0);
+      bad_esp_filter(f, 1);
+      mapid = nth_arg(f, 1);
+      sys_munmap(mapid);
       break;
 
     default:
@@ -111,7 +168,7 @@ static inline void
 bad_esp_filter(struct intr_frame *f, int n)
 {
   if((((int32_t *)f->esp) + n + 1) > PHYS_BASE)
-    page_fault(f);
+    sys_exit(-1);
 }
 
 static inline uint32_t
@@ -128,93 +185,80 @@ is_valid(void *pointer)
 
 
 static void
-sys_halt(struct intr_frame *f)
+sys_halt(void)
 {
-  bad_esp_filter(f, 0);
   power_off();
 }
 
 static void
-sys_exit(struct intr_frame *f)
+sys_exit(int status)
 {
-  bad_esp_filter(f, 1);
-  int status = nth_arg(f, 1);
-//  if(lock_held_by_current_thread(&file_lock))
-//      lock_release(&file_lock);
+  if(lock_held_by_current_thread(&file_lock))
+      lock_release(&file_lock);
   thread_current()->exit_status = status;
   thread_exit();
 }
 
-static void
-sys_exec(struct intr_frame *f)
+static pid_t
+sys_exec(const char *cmd_line)
 {
-  bad_esp_filter(f, 1);
-  const char *cmd_line = nth_arg(f, 1);
   pid_t pid;
 
   if(is_valid(cmd_line)){
     pid = process_execute(cmd_line);
-    f->eax = pid;
+    return pid;
   }
   else
-    page_fault(f);
+    sys_exit(-1);
 }
 
-static void
-sys_wait(struct intr_frame *f)
+static int
+sys_wait(pid_t pid)
 {
-  bad_esp_filter(f, 1);
-  pid_t pid = nth_arg(f, 1);
-  f->eax = process_wait(pid);
+  return process_wait(pid);
 }
 
-static void
-sys_create(struct intr_frame *f)
+static bool
+sys_create(const char *file, unsigned initial_size)
 {
-  bad_esp_filter(f, 2);
-  const char *file = nth_arg(f, 1);
-  unsigned initial_size = nth_arg(f, 2);
   bool create;
 
   if(is_valid(file)){
-//    lock_acquire(&file_lock);
+    lock_acquire(&file_lock);
     create = filesys_create(file, initial_size);
-    f->eax = create;
-//    lock_release(&file_lock);
+    lock_release(&file_lock);
+    return create;
   }
   else
-    page_fault(f);
+    sys_exit(-1);
 }
 
-static void
-sys_remove(struct intr_frame *f)
+static bool
+sys_remove(const char *file)
 {
-  bad_esp_filter(f, 1);
-  const char *file = nth_arg(f, 1);
   bool remove;
 
   if(is_valid(file)){
-//    lock_acquire(&file_lock);
+    lock_acquire(&file_lock);
     remove = filesys_remove(file);
-    f->eax = remove;
-//    lock_release(&file_lock);
+    lock_release(&file_lock);
+    return remove;
   }
   else
-    page_fault(f);
+    sys_exit(-1);
 }
 
-static void
-sys_open(struct intr_frame *f)
+static int
+sys_open(const char *file)
 {
-  bad_esp_filter(f, 1);
-  const char *file = nth_arg(f, 1);
-
   if(is_valid(file)){
-//    lock_acquire(&file_lock);
     int fd;
     struct thread *t = thread_current();
     struct thread_filesys *tf = malloc(sizeof(struct thread_filesys));
+
+    lock_acquire(&file_lock);
     struct file *of = filesys_open(file);
+    lock_release(&file_lock);
 
     if(of){
       fd = t->maxfd + 1;
@@ -227,143 +271,175 @@ sys_open(struct intr_frame *f)
       fd = -1;
       free(tf);
     }
-    f->eax = fd;
-//    lock_release(&file_lock);
+    return fd;
   }
   else
-    page_fault(f);
+    sys_exit(-1);
 }
 
-static void
-sys_filesize(struct intr_frame *f)
+static int
+sys_filesize(int fd)
 {
-  bad_esp_filter(f, 1);
-  int fd = nth_arg(f, 1);
   int size;
-//  lock_acquire(&file_lock);
-  struct thread *t = thread_current();
-  struct thread_filesys *tf = lookup_fd(t, fd);
-  if(tf)
-    size = file_length(tf->file);
-  else
-    size = 0;
-  f->eax = size;
-//  lock_release(&file_lock);
-}
-
-static void
-sys_read(struct intr_frame *f)
-{
-  bad_esp_filter(f, 3);
-  int fd = nth_arg(f, 1);
-  void *buffer = nth_arg(f, 2);
-  unsigned size = nth_arg(f, 3);
-  int result;
-
-  if(is_valid(buffer)){
-//    lock_acquire(&file_lock);
-    if(fd == 0){
-      input_getc();
-    }
-    else{
-      struct thread *t = thread_current();
-      struct thread_filesys *tf = lookup_fd(t, fd);
-      if(tf){
-        result = file_read(tf->file, buffer, size);
-      }
-      else
-        result = -1;
-      f->eax = result;
-    }
-//    lock_release(&file_lock);
-  }
-  else
-    page_fault(f);
-}
-
-static void
-sys_write(struct intr_frame *f)
-{
-  bad_esp_filter(f, 3);
-  int fd = nth_arg(f, 1);
-  const void *buffer = nth_arg(f, 2);
-  unsigned size = nth_arg(f, 3);
-  int result;
-
-  if(is_valid(buffer)){
-//    lock_acquire(&file_lock);
-    if(fd == 1){
-      putbuf(buffer, size);
-    }
-    else{
-      struct thread *t = thread_current();
-      struct thread_filesys *tf = lookup_fd(t, fd);
-      if(tf){
-        result = file_write(tf->file, buffer, size);
-      }
-      else
-        result = -1;
-      f->eax = result;
-    }
-//    lock_release(&file_lock);
-  }
-  else
-    page_fault(f);
-}
-
-static void
-sys_seek(struct intr_frame *f)
-{
-  bad_esp_filter(f, 2);
-  int fd = nth_arg(f, 1);
-  unsigned position = nth_arg(f, 2);
-
-//  lock_acquire(&file_lock);
-  struct thread *t = thread_current();
-  struct thread_filesys *tf = lookup_fd(t, fd);
-  if(tf)
-    file_seek(tf->file, position);
-//  lock_release(&file_lock);
-}
-
-static void
-sys_tell(struct intr_frame *f)
-{
-  bad_esp_filter(f, 1);
-  int fd = nth_arg(f, 1);
-  unsigned result;
-
-//  lock_acquire(&file_lock);
   struct thread *t = thread_current();
   struct thread_filesys *tf = lookup_fd(t, fd);
   if(tf){
+    lock_acquire(&file_lock);
+    size = file_length(tf->file);
+    lock_release(&file_lock);
+  }
+  else
+    size = 0;
+  return size;
+}
+
+static int
+sys_read(int fd, void *buffer, unsigned size)
+{
+  int result;
+
+  if(is_valid(buffer)){
+    if(fd == 0)
+      input_getc();
+    else{
+      struct thread *t = thread_current();
+      struct thread_filesys *tf = lookup_fd(t, fd);
+      if(tf){
+        lock_acquire(&file_lock);
+        result = file_read(tf->file, buffer, size);
+        lock_release(&file_lock);
+      }
+      else
+        result = -1;
+      return result;
+    }
+  }
+  else
+    sys_exit(-1);
+}
+
+static int
+sys_write(int fd, const void *buffer, unsigned size)
+{
+  int result;
+
+  if(is_valid(buffer)){
+    if(fd == 1)
+      putbuf(buffer, size);
+    else{
+      struct thread *t = thread_current();
+      struct thread_filesys *tf = lookup_fd(t, fd);
+      if(tf){
+        lock_acquire(&file_lock);
+        result = file_write(tf->file, buffer, size);
+        lock_release(&file_lock);
+      }
+      else
+        result = -1;
+      return result;
+    }
+  }
+  else
+    sys_exit(-1);
+}
+
+static void
+sys_seek(int fd, unsigned position)
+{
+  struct thread *t = thread_current();
+  struct thread_filesys *tf = lookup_fd(t, fd);
+  if(tf){
+    lock_acquire(&file_lock);
+    file_seek(tf->file, position);
+    lock_release(&file_lock);
+  }
+}
+
+static unsigned
+sys_tell(int fd)
+{
+  unsigned result;
+  struct thread *t = thread_current();
+  struct thread_filesys *tf = lookup_fd(t, fd);
+  if(tf){
+    lock_acquire(&file_lock);
     result = file_tell(fd);
+    lock_release(&file_lock);
   }
   else
     result = -1;
-  f->eax = result;
-//  lock_release(&file_lock);
+  return result;
 }
 
 static void
-sys_close(struct intr_frame *f)
+sys_close(int fd)
 {
-  bad_esp_filter(f, 1);
-  int fd = nth_arg(f, 1);
-
-//  lock_acquire(&file_lock);
   struct thread *t = thread_current();
   struct thread_filesys *tf = lookup_fd(t, fd);
-
   if(tf){
+    lock_acquire(&file_lock);
     file_close(tf->file);
+    lock_release(&file_lock);
     list_remove(&tf->elem);
     free(tf);
   }
-//  lock_release(&file_lock);
+}
+/*
+static mapid_t
+sys_mmap(int fd, void *addr)
+{
+  void *i;
+  bool success = true;
+  int ofs = 0, filesize = sys_filesize(fd);
+  struct thread *t = thread_current();
+
+  if(fd == 0 || fd == 1 || addr == NULL || pg_ofs(addr) || filesize == 0)
+    success = false;
+
+  for(i = addr; i < addr + filesize; i += PGSIZE){
+    if(spt_find(addr) != NULL)
+      success = false;
+  }
+
+  if(!success)
+    sys_exit(-1);
+
+  struct thread_filesys *tf = lookup_fd(t, fd);
+  struct thread_mmap *tm = (struct thread_mmap *)malloc(sizeof(struct thread_mmap));
+  tm->mapid = t->max_mapid++;
+  tm->file = tf->file;
+  tm->start_addr = addr;
+  tm->size = filesize;
+  list_push_back(&t->mmap_files, &tm->elem);
+
+  frame_lock_ac();
+  while(filesize > 0){
+    struct spte *pseudo_spte = spte_create(addr + ofs, NULL, P_MMAP | P_LAZY | P_WRITABLE);
+    pseudo_spte->file = tf->file;
+    pseudo_spte->ofs = ofs;
+    pseudo_spte->read_bytes = filesize < PGSIZE ? filesize : PGSIZE;
+    ofs += PGSIZE;
+    filesize -= PGSIZE;
+  }
+  frame_lock_rl();
+
+  return tm->mapid;
 }
 
-
+static void
+sys_munmap(mapid_t mapid)
+{
+  struct thread *t = thread_current();
+  struct thread_mmap *tm = lookup_mapid(t, mapid);
+  if(tm){
+    frame_lock_ac();
+    mmap_free(tm);
+    frame_lock_rl();
+    list_remove(&tm->elem);
+    free(tm);
+  }
+}
+*/
 static struct thread_filesys
 *lookup_fd(struct thread *t, int fd)
 {
@@ -373,7 +449,64 @@ static struct thread_filesys
     if(tf->fd == fd)
       return tf;
   }
-  // not found.
+  /* not found. */
+  return NULL;
+}
+/*
+static struct thread_mmap
+*lookup_mapid(struct thread *t, mapid_t mapid)
+{
+  struct list_elem *e;
+  for(e = list_begin(&t->mmap_files); e != list_end(&t->mmap_files); e = list_next(e)){
+    struct thread_mmap *tm = list_entry(e, struct thread_mmap, elem);
+    if(tm->mapid == mapid)
+      return tm;
+  }
   return NULL;
 }
 
+void
+mmap_free(struct thread_mmap *tm)
+{
+  struct spte *p;
+  int status, ofs = 0;
+  bool dirty;
+  void *start_addr = tm->start_addr;
+  int size = tm->size;
+  struct thread *t = thread_current();
+
+  ASSERT(frame_lock_held_by_curr());
+  while(size > 0){
+    p = spt_find(start_addr + ofs);
+    ASSERT(p != NULL);
+    ASSERT(p->status & P_MMAP);
+    ASSERT(t == p->thread);
+
+    status = p->status;
+    dirty = (status & P_DIRTY) || pagedir_is_dirty(t->pagedir, start_addr + ofs);
+
+    if(status & P_LAZY){
+      ASSERT(dirty == false);
+      spte_free(p);
+    }
+    else{
+      if(status & P_INSWAP)
+        swap_in(p);
+      struct frame_entry *f = p->frame_entry;
+      ASSERT(f != NULL);
+      if(dirty){
+        lock_acquire(&file_lock);
+        file_seek(tm->file, p->ofs);
+        file_write(tm->file, f->frame_addr, p->read_bytes);
+        lock_release(&file_lock);
+      }
+      frame_free(f);
+      spte_free(p);
+    }
+    ofs += PGSIZE;
+    size -= PGSIZE;
+  }
+}
+
+
+*/
