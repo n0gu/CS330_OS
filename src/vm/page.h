@@ -10,7 +10,6 @@ enum spte_status
     P_INSWAP = 2,
     P_LAZY = 4,
     P_MMAP = 8,
-    P_DIRTY = 16
   };
 
 struct spte

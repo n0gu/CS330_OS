@@ -6,6 +6,7 @@
 #include "threads/malloc.h"
 #include "userprog/pagedir.h"
 #include "userprog/process.h"
+#include "userprog/syscall.h"
 #include "vm/frame.h"
 #include "vm/page.h"
 #include "vm/swap.h"
@@ -28,18 +29,21 @@ void
 swap_in(struct spte *p)
 {
   ASSERT(frame_lock_held_by_curr());
+  ASSERT(p->status & P_INSWAP);
   struct frame_entry *fe = frame_alloc(p, false);
   int i;
 
-  for(i = 0; i < PAGE_NUM_SECTORS; i++)
-    disk_read(swap_disk, p->swap_addr + i, (uint8_t *)fe->frame_addr + DISK_SECTOR_SIZE * i);
-
+  if(p->status & P_MMAP){
+    file_in(p, fe);
+  }
+  else{
+    for(i = 0; i < PAGE_NUM_SECTORS; i++)
+      disk_read(swap_disk, p->swap_addr + i, (uint8_t *)fe->frame_addr + DISK_SECTOR_SIZE * i);
+    bitmap_set_multiple(swap_table, p->swap_addr, PAGE_NUM_SECTORS, false);
+  }
   spte_unmark(p, P_INSWAP);
   ASSERT(p->frame_entry == fe);
   ASSERT(fe->spte == p);
-
-  bitmap_set_multiple(swap_table, p->swap_addr, PAGE_NUM_SECTORS, false);
-
   if(!install_page(p->page_addr, fe->frame_addr, (p->status & P_WRITABLE)))
     PANIC("install page fail at swap_in\n");
 }
@@ -53,21 +57,22 @@ swap_out(struct frame_entry *victim)
   ASSERT(!(vic_spte->status & P_INSWAP));
   ASSERT(vic_spte->frame_entry == victim);
   int i,  swap_idx;
+  bool dirty = pagedir_is_dirty(vic_spte->thread->pagedir, vic_spte->page_addr);
 
-  if(pagedir_is_dirty(vic_spte->thread->pagedir, vic_spte->page_addr))
-    spte_mark(vic_spte, P_DIRTY);
   pagedir_clear_page(vic_spte->thread->pagedir, vic_spte->page_addr);
-  swap_idx = bitmap_scan_and_flip(swap_table, 0, PAGE_NUM_SECTORS, false);
-
-  if(swap_idx == BITMAP_ERROR)
-    PANIC("NOT ENOUGH MEMORY IN SWAP SPACE");
-
   spte_mark(vic_spte, P_INSWAP);
-  vic_spte->swap_addr = swap_idx;
-  vic_spte->frame_entry = NULL;
 
-  for(i = 0; i < PAGE_NUM_SECTORS; i++)
-    disk_write(swap_disk, swap_idx + i, (uint8_t *)victim->frame_addr + DISK_SECTOR_SIZE * i);
+  if(vic_spte->status & P_MMAP){
+    if(dirty) file_out(vic_spte);
+  }
+  else{
+    swap_idx = bitmap_scan_and_flip(swap_table, 0, PAGE_NUM_SECTORS, false);
+    if(swap_idx == BITMAP_ERROR)
+      PANIC("NOT ENOUGH MEMORY IN SWAP SPACE");
+    vic_spte->swap_addr = swap_idx;
+    for(i = 0; i < PAGE_NUM_SECTORS; i++)
+      disk_write(swap_disk, swap_idx + i, (uint8_t *)victim->frame_addr + DISK_SECTOR_SIZE * i);
+  }
 }
 
 void

@@ -106,7 +106,6 @@ spt_free(struct hash_elem *elem, void *aux)
 
   if(!(status & P_LAZY)){
     if(status & P_INSWAP){
-      ASSERT(p->frame_entry == NULL);
       swap_free(p->swap_addr);
     }
     else{

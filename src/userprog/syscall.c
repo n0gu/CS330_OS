@@ -479,30 +479,42 @@ mmap_free(struct thread_mmap *tm)
     ASSERT(t == p->thread);
 
     status = p->status;
-    dirty = (status & P_DIRTY) || pagedir_is_dirty(t->pagedir, addr);
+    dirty = pagedir_is_dirty(t->pagedir, addr);
 
-    if(status & P_LAZY){
-      ASSERT(dirty == false);
-      spte_free(p);
-    }
-    else{
-      if(status & P_INSWAP)
-        swap_in(p);
+    if(!(status & P_LAZY) && !(status & P_INSWAP)){
       struct frame_entry *f = p->frame_entry;
       ASSERT(f != NULL);
-      if(dirty){
-        lock_acquire(&file_lock);
-        file_seek(tm->file, p->ofs);
-        file_write(tm->file, f->frame_addr, p->read_bytes);
-        lock_release(&file_lock);
-      }
+      if(dirty) file_out(p);
       frame_free(f);
-      spte_free(p);
     }
+    spte_free(p);
     addr += PGSIZE;
     size -= PGSIZE;
   }
   lock_acquire(&file_lock);
   file_close(tm->file);
+  lock_release(&file_lock);
+}
+
+void
+file_out(struct spte *spte)
+{
+  ASSERT(frame_lock_held_by_curr());
+  ASSERT(spte->frame_entry != NULL);
+
+  lock_acquire(&file_lock);
+  file_seek(spte->file, spte->ofs);
+  file_write(spte->file, spte->frame_entry->frame_addr, spte->read_bytes);
+  lock_release(&file_lock);
+}
+
+void
+file_in(struct spte *spte, struct frame_entry *f)
+{
+  ASSERT(frame_lock_held_by_curr());
+
+  lock_acquire(&file_lock);
+  file_seek(spte->file, spte->ofs);
+  file_read(spte->file, f->frame_addr, spte->read_bytes);
   lock_release(&file_lock);
 }
