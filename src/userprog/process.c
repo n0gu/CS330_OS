@@ -183,6 +183,13 @@ process_exit (void)
   int status = curr->exit_status;
 
   file_close(curr->exec);
+  frame_lock_ac();
+  while(!list_empty(&curr->mmaps)){
+    struct list_elem *e = list_pop_front(&curr->mmaps);
+    struct thread_mmap *tm = list_entry(e, struct thread_mmap, elem);
+    mmap_free(tm);
+  }
+  frame_lock_rl();
   while(!list_empty(&curr->open_files)){
     struct list_elem *e = list_pop_front(&curr->open_files);
     struct thread_filesys *tf = list_entry(e, struct thread_filesys, elem);
@@ -621,7 +628,6 @@ load_lazy(struct spte *spte)
     destroy_both_entry(spte);
     return false;
   }
-
   /* Add the page to the process's address space. */
   if (!install_page (upage, kpage, spte->status & P_WRITABLE))
   {

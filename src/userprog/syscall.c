@@ -14,6 +14,7 @@
 #include "filesys/filesys.h"
 #include "vm/frame.h"
 #include "vm/page.h"
+#include "vm/swap.h"
 
 struct lock file_lock;
 static inline uint32_t nth_arg(struct intr_frame *f, int n);
@@ -38,6 +39,7 @@ static mapid_t sys_mmap(int, void *);
 static void sys_munmap(mapid_t);
 static struct thread_filesys *lookup_fd(struct thread *, int);
 static struct thread_mmap *lookup_mapid(struct thread *, mapid_t);
+
 void
 syscall_init (void)
 {
@@ -143,15 +145,13 @@ syscall_handler (struct intr_frame *f)
       break;
 
     case SYS_MMAP:
-      ASSERT(0);
       bad_esp_filter(f, 2);
       fd = nth_arg(f, 1);
       buffer = nth_arg(f, 2);
-      sys_mmap(fd, buffer);
+      f->eax = sys_mmap(fd, buffer);
       break;
 
     case SYS_MUNMAP:
-      ASSERT(0);
       bad_esp_filter(f, 1);
       mapid = nth_arg(f, 1);
       sys_munmap(mapid);
@@ -384,44 +384,40 @@ sys_close(int fd)
     free(tf);
   }
 }
-/*
+
 static mapid_t
 sys_mmap(int fd, void *addr)
 {
   void *i;
-  bool success = true;
   int ofs = 0, filesize = sys_filesize(fd);
-  struct thread *t = thread_current();
 
   if(fd == 0 || fd == 1 || addr == NULL || pg_ofs(addr) || filesize == 0)
-    success = false;
+    return -1;
 
-  for(i = addr; i < addr + filesize; i += PGSIZE){
-    if(spt_find(addr) != NULL)
-      success = false;
-  }
+  for(i = addr; i < addr + filesize; i += PGSIZE)
+    if(spt_find(addr) != NULL) return -1;
 
-  if(!success)
-    sys_exit(-1);
-
+  struct thread *t = thread_current();
   struct thread_filesys *tf = lookup_fd(t, fd);
   struct thread_mmap *tm = (struct thread_mmap *)malloc(sizeof(struct thread_mmap));
   tm->mapid = t->max_mapid++;
-  tm->file = tf->file;
+  lock_acquire(&file_lock);
+  tm->file = file_reopen(tf->file);
+  lock_release(&file_lock);
   tm->start_addr = addr;
   tm->size = filesize;
-  list_push_back(&t->mmap_files, &tm->elem);
+  list_push_back(&t->mmaps, &tm->elem);
 
-  frame_lock_ac();
+//  frame_lock_ac();
   while(filesize > 0){
     struct spte *pseudo_spte = spte_create(addr + ofs, NULL, P_MMAP | P_LAZY | P_WRITABLE);
-    pseudo_spte->file = tf->file;
+    pseudo_spte->file = tm->file;
     pseudo_spte->ofs = ofs;
     pseudo_spte->read_bytes = filesize < PGSIZE ? filesize : PGSIZE;
     ofs += PGSIZE;
     filesize -= PGSIZE;
   }
-  frame_lock_rl();
+//  frame_lock_rl();
 
   return tm->mapid;
 }
@@ -439,7 +435,7 @@ sys_munmap(mapid_t mapid)
     free(tm);
   }
 }
-*/
+
 static struct thread_filesys
 *lookup_fd(struct thread *t, int fd)
 {
@@ -452,12 +448,12 @@ static struct thread_filesys
   /* not found. */
   return NULL;
 }
-/*
+
 static struct thread_mmap
 *lookup_mapid(struct thread *t, mapid_t mapid)
 {
   struct list_elem *e;
-  for(e = list_begin(&t->mmap_files); e != list_end(&t->mmap_files); e = list_next(e)){
+  for(e = list_begin(&t->mmaps); e != list_end(&t->mmaps); e = list_next(e)){
     struct thread_mmap *tm = list_entry(e, struct thread_mmap, elem);
     if(tm->mapid == mapid)
       return tm;
@@ -468,22 +464,22 @@ static struct thread_mmap
 void
 mmap_free(struct thread_mmap *tm)
 {
+  ASSERT(frame_lock_held_by_curr());
   struct spte *p;
-  int status, ofs = 0;
+  int status;
   bool dirty;
-  void *start_addr = tm->start_addr;
+  void *addr = tm->start_addr;
   int size = tm->size;
   struct thread *t = thread_current();
 
-  ASSERT(frame_lock_held_by_curr());
   while(size > 0){
-    p = spt_find(start_addr + ofs);
+    p = spt_find(addr);
     ASSERT(p != NULL);
     ASSERT(p->status & P_MMAP);
     ASSERT(t == p->thread);
 
     status = p->status;
-    dirty = (status & P_DIRTY) || pagedir_is_dirty(t->pagedir, start_addr + ofs);
+    dirty = (status & P_DIRTY) || pagedir_is_dirty(t->pagedir, addr);
 
     if(status & P_LAZY){
       ASSERT(dirty == false);
@@ -503,10 +499,10 @@ mmap_free(struct thread_mmap *tm)
       frame_free(f);
       spte_free(p);
     }
-    ofs += PGSIZE;
+    addr += PGSIZE;
     size -= PGSIZE;
   }
+  lock_acquire(&file_lock);
+  file_close(tm->file);
+  lock_release(&file_lock);
 }
-
-
-*/

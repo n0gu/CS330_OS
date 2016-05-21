@@ -54,6 +54,8 @@ swap_out(struct frame_entry *victim)
   ASSERT(vic_spte->frame_entry == victim);
   int i,  swap_idx;
 
+  if(pagedir_is_dirty(vic_spte->thread->pagedir, vic_spte->page_addr))
+    spte_mark(vic_spte, P_DIRTY);
   pagedir_clear_page(vic_spte->thread->pagedir, vic_spte->page_addr);
   swap_idx = bitmap_scan_and_flip(swap_table, 0, PAGE_NUM_SECTORS, false);
 

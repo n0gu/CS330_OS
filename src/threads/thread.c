@@ -450,6 +450,7 @@ init_thread (struct thread *t, const char *name, int priority)
   sema_init(&t->parent_reap_fin, 0);
   list_init(&t->child);
   list_init(&t->open_files);
+  list_init(&t->mmaps);
   t->status = THREAD_BLOCKED;
   strlcpy (t->name, name, sizeof t->name);
   t->stack = (uint8_t *) t + PGSIZE;

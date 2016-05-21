@@ -110,9 +110,10 @@ struct thread
     int exit_status;
     void *syscall_esp;
 #endif
-
 #ifdef VM
     struct hash spt;
+    struct list mmaps;
+    int max_mapid;
 #endif
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
@@ -122,6 +123,15 @@ struct thread_filesys
   {
     int fd;
     struct file *file;
+    struct list_elem elem;
+  };
+
+struct thread_mmap
+  {
+    int mapid;
+    struct file *file;
+    void *start_addr;
+    uint32_t size;
     struct list_elem elem;
   };
 
