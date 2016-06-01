@@ -619,9 +619,8 @@ load_lazy(struct spte *spte)
   uint8_t *upage = spte->page_addr;
   uint8_t *kpage = f->frame_addr;
 
-  file_seek(spte->file, spte->ofs);
   /* Load this page. */
-  if (file_read (spte->file, kpage, spte->read_bytes) != (int) spte->read_bytes)
+  if (file_read_at (spte->file, kpage, spte->read_bytes, spte->ofs) != (int) spte->read_bytes)
   {
     palloc_free_page (kpage);
     puts("destroy");

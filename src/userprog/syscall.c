@@ -503,8 +503,7 @@ file_out(struct spte *spte)
   ASSERT(spte->frame_entry != NULL);
 
   lock_acquire(&file_lock);
-  file_seek(spte->file, spte->ofs);
-  file_write(spte->file, spte->frame_entry->frame_addr, spte->read_bytes);
+  file_write_at(spte->file, spte->frame_entry->frame_addr, spte->read_bytes, spte->ofs);
   lock_release(&file_lock);
 }
 
@@ -514,7 +513,6 @@ file_in(struct spte *spte, struct frame_entry *f)
   ASSERT(frame_lock_held_by_curr());
 
   lock_acquire(&file_lock);
-  file_seek(spte->file, spte->ofs);
-  file_read(spte->file, f->frame_addr, spte->read_bytes);
+  file_read_at(spte->file, f->frame_addr, spte->read_bytes, spte->ofs);
   lock_release(&file_lock);
 }
