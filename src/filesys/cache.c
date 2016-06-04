@@ -6,6 +6,9 @@
 #include "filesys/filesys.h"
 #include "filesys/cache.h"
 
+#define MAX_CACHE 64
+#define MAX_REQUEST 32
+
 struct list caches; /* MLU cache on the left side of the queue */
 struct lock cache_lock;
 int cache_cnt;
@@ -93,7 +96,7 @@ disk_io_helper(disk_sector_t sec_no, void *buffer, bool read)
     lock_release(&cache_lock);
   }
   else{
-    if(cache_cnt == 64){
+    if(cache_cnt == MAX_CACHE){
       c = list_entry(list_pop_back(&caches), struct cache_entry, elem);
       list_push_front(&caches, &c->elem);
       lock_acquire(&c->entry_lock);
@@ -208,7 +211,7 @@ read_ahead(struct request_entry *r)
     lock_release(&cache_lock);
   }
   else{
-    if(cache_cnt == 64){
+    if(cache_cnt == MAX_CACHE){
       c = list_entry(list_pop_back(&caches), struct cache_entry, elem);
       list_push_front(&caches, &c->elem);
       lock_acquire(&c->entry_lock);
