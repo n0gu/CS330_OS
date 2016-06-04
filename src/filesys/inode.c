@@ -6,6 +6,7 @@
 #include "filesys/filesys.h"
 #include "filesys/free-map.h"
 #include "filesys/cache.h"
+#include "threads/thread.h"
 #include "threads/malloc.h"
 
 /* Identifies an inode. */
@@ -246,7 +247,11 @@ inode_read_at (struct inode *inode, void *buffer_, off_t size, off_t offset)
       bytes_read += chunk_size;
     }
   free (bounce);
-  // if implement read ahead -> next sector to read is.. 
+
+  disk_sector_t next_sector = byte_to_sector(inode, DISK_SECTOR_SIZE * DIV_ROUND_UP(size + offset, DISK_SECTOR_SIZE));
+  if(next_sector != -1)
+    send_request(next_sector);
+
   return bytes_read;
 }
 
