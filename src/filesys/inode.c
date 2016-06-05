@@ -8,6 +8,7 @@
 #include "filesys/cache.h"
 #include "threads/thread.h"
 #include "threads/malloc.h"
+#include "threads/synch.h"
 
 /* Identifies an inode. */
 #define INODE_MAGIC 0x494e4f44
@@ -16,8 +17,10 @@
    Must be exactly DISK_SECTOR_SIZE bytes long. */
 struct inode_disk
   {
-    disk_sector_t start;                /* First data sector. */
+    disk_sector_t idx_lv1;              /* Location of index block level 1. */
     off_t length;                       /* File size in bytes. */
+//    bool is_dir;
+//    disk_sector_t parent_dir_sec;
     unsigned magic;                     /* Magic number. */
     uint32_t unused[125];               /* Not used. */
   };
@@ -31,15 +34,10 @@ bytes_to_sectors (off_t size)
 }
 
 /* In-memory inode. */
-struct inode 
-  {
-    struct list_elem elem;              /* Element in inode list. */
-    disk_sector_t sector;               /* Sector number of disk location. */
-    int open_cnt;                       /* Number of openers. */
-    bool removed;                       /* True if deleted, false otherwise. */
-    int deny_write_cnt;                 /* 0: writes ok, >0: deny writes. */
-    struct inode_disk data;             /* Inode content. */
-  };
+
+static bool install_sector(disk_sector_t idx_lv1, off_t start, off_t end);
+static void destroy_sector(struct inode *inode);
+static void dump_idx(disk_sector_t idx_lv1, off_t length);
 
 /* Returns the disk sector that contains byte offset POS within
    INODE.
@@ -49,8 +47,17 @@ static disk_sector_t
 byte_to_sector (const struct inode *inode, off_t pos) 
 {
   ASSERT (inode != NULL);
-  if (pos < inode->data.length)
-    return inode->data.start + pos / DISK_SECTOR_SIZE;
+  if (pos < inode->length){
+    disk_sector_t buffer[128];
+    disk_sector_t sec_no = pos / DISK_SECTOR_SIZE;
+    int lv1_idx = sec_no / 128;
+    int lv2_idx = sec_no % 128;
+
+    disk_read_with_cache(inode->idx_lv1, buffer);
+    disk_sector_t lv2_sector = buffer[lv1_idx];
+    disk_read_with_cache(lv2_sector, buffer);
+    return buffer[lv2_idx];
+  }
   else
     return -1;
 }
@@ -82,28 +89,25 @@ inode_create (disk_sector_t sector, off_t length)
   /* If this assertion fails, the inode structure is not exactly
      one sector in size, and you should fix that. */
   ASSERT (sizeof *disk_inode == DISK_SECTOR_SIZE);
-
+//  printf("creating inode at %d -- length %d\n", sector, length);
   disk_inode = calloc (1, sizeof *disk_inode);
   if (disk_inode != NULL)
     {
-      size_t sectors = bytes_to_sectors (length);
+      size_t sectors_left = bytes_to_sectors (length);
+      size_t num_idx_lv2 = DIV_ROUND_UP(sectors_left, DISK_SECTOR_SIZE / 4);
+      ASSERT(num_idx_lv2 <= 128);
+
       disk_inode->length = length;
       disk_inode->magic = INODE_MAGIC;
-      if (free_map_allocate (sectors, &disk_inode->start))  // have to change <sectors> cont alloc into partial alloc
+
+      if (free_map_allocate (1, &disk_inode->idx_lv1))
         {
-          disk_write (filesys_disk, sector, disk_inode);
-          if (sectors > 0) 
-            {
-              static char zeros[DISK_SECTOR_SIZE];
-              size_t i;
-              
-              for (i = 0; i < sectors; i++) 
-                disk_write (filesys_disk, disk_inode->start + i, zeros); 
-            }
-          success = true; 
-        } 
+          success = install_sector(disk_inode->idx_lv1, 0, length);
+          disk_write_with_cache(sector, disk_inode);
+        }
       free (disk_inode);
     }
+//  printf("inode create finished.\n");
   return success;
 }
 
@@ -115,6 +119,7 @@ inode_open (disk_sector_t sector)
 {
   struct list_elem *e;
   struct inode *inode;
+  struct inode_disk d;
 
   /* Check whether this inode is already open. */
   for (e = list_begin (&open_inodes); e != list_end (&open_inodes);
@@ -139,7 +144,14 @@ inode_open (disk_sector_t sector)
   inode->open_cnt = 1;
   inode->deny_write_cnt = 0;
   inode->removed = false;
-  disk_read (filesys_disk, inode->sector, &inode->data);
+
+  disk_read_with_cache(sector, &d);
+  inode->length = d.length;
+  inode->idx_lv1 = d.idx_lv1;
+
+  lock_init(&inode->lock);
+  sema_init(&inode->in_read, 1);
+  inode->read_cnt = 0;
   return inode;
 }
 
@@ -168,7 +180,6 @@ inode_close (struct inode *inode)
   /* Ignore null pointer. */
   if (inode == NULL)
     return;
-
   /* Release resources if this was the last opener. */
   if (--inode->open_cnt == 0)
     {
@@ -178,11 +189,8 @@ inode_close (struct inode *inode)
       /* Deallocate blocks if removed. */
       if (inode->removed) 
         {
-          free_map_release (inode->sector, 1);
-          free_map_release (inode->data.start,
-                            bytes_to_sectors (inode->data.length)); 
+          destroy_sector(inode);
         }
-
       free (inode); 
     }
 }
@@ -206,6 +214,10 @@ inode_read_at (struct inode *inode, void *buffer_, off_t size, off_t offset)
   off_t bytes_read = 0;
   uint8_t *bounce = NULL;
 
+  lock_acquire(&inode->lock);
+  if(++inode->read_cnt == 1)
+    sema_down(&inode->in_read);
+  lock_release(&inode->lock);
   while (size > 0) 
     {
       /* Disk sector to read, starting byte offset within sector. */
@@ -248,9 +260,14 @@ inode_read_at (struct inode *inode, void *buffer_, off_t size, off_t offset)
     }
   free (bounce);
 
-  disk_sector_t next_sector = byte_to_sector(inode, DISK_SECTOR_SIZE * DIV_ROUND_UP(size + offset, DISK_SECTOR_SIZE));
-  if(next_sector != -1)
-    send_request(next_sector);
+//  disk_sector_t next_sector = byte_to_sector(inode, DISK_SECTOR_SIZE * DIV_ROUND_UP(size + offset, DISK_SECTOR_SIZE));
+//  if(next_sector != -1)
+//    send_request(next_sector);
+
+  lock_acquire(&inode->lock);
+  if(--inode->read_cnt == 0)
+    sema_up(&inode->in_read);
+  lock_release(&inode->lock);
 
   return bytes_read;
 }
@@ -267,9 +284,22 @@ inode_write_at (struct inode *inode, const void *buffer_, off_t size,
   const uint8_t *buffer = buffer_;
   off_t bytes_written = 0;
   uint8_t *bounce = NULL;
+  bool extend = false;
 
   if (inode->deny_write_cnt)
     return 0;
+//  printf("inode write at begin at inode %08x to %08x\n", inode, buffer);
+  if(inode->length < size + offset)
+  {
+    extend = true;
+    sema_down(&inode->in_read);
+    struct inode_disk d;
+    install_sector(inode->idx_lv1, inode->length, size + offset);
+    inode->length = size + offset;
+    disk_read_with_cache(inode->sector, &d);
+    d.length = size + offset;
+    disk_write_with_cache(inode->sector, &d);
+  }
 
   while (size > 0) 
     {
@@ -320,6 +350,10 @@ inode_write_at (struct inode *inode, const void *buffer_, off_t size,
     }
   free (bounce);
 
+  if(extend)
+    sema_up(&inode->in_read);
+
+//  printf("inode write at finish at inode %08x to %08x\n", inode, buffer);
   return bytes_written;
 }
 
@@ -347,5 +381,122 @@ inode_allow_write (struct inode *inode)
 off_t
 inode_length (const struct inode *inode)
 {
-  return inode->data.length;
+  return inode->length;
 }
+
+
+static bool
+install_sector(disk_sector_t idx_lv1, off_t start, off_t end)
+{
+  /* start greater or equal , end less */
+  /* inode's index block level 1 should be already exist */
+  /* start = previous length, end = new length ex) 0, 143 */
+  ASSERT(start <= end);
+ 
+  disk_sector_t start_sectors = bytes_to_sectors(start);
+  disk_sector_t end_sectors = bytes_to_sectors(end);
+
+//  printf("installing byte %d-%d, sector %d-%d\nidx sector %d\n", start, end, start_sectors, end_sectors, idx_lv1);
+  if(start_sectors == end_sectors) return true;
+
+  off_t sectors_left = end_sectors - start_sectors;
+  int end_lv1_num = DIV_ROUND_UP(end_sectors, 128);
+
+  disk_sector_t buf[128];
+  disk_read_with_cache(idx_lv1, buf);
+
+  int lv1_idx = start_sectors / 128;
+  int lv2_idx = start_sectors % 128;
+  while(lv1_idx < end_lv1_num)
+  {
+    disk_sector_t buf2[128];
+    if(lv2_idx == 0){
+      if(!free_map_allocate(1, &buf[lv1_idx])) return false;
+//      printf("at idx_1 : installing new block\n");
+    }
+    else{
+      disk_read_with_cache(buf[lv1_idx], buf2);
+//      printf("at idx_1 : already exist, read from disk\n");
+    }
+    while(lv2_idx < 128)
+    {
+      if(sectors_left == 0){
+        buf2[lv2_idx] = 0;
+      }
+      else{
+        if(!free_map_allocate(1, &buf2[lv2_idx])) return false;
+//        printf("installing %dth sector fin\n", lv1_idx * 128 + lv2_idx + 1);
+        sectors_left--;
+      }
+      lv2_idx++;
+    }
+    disk_write_with_cache(buf[lv1_idx], buf2);
+    lv2_idx = 0;
+    lv1_idx++;
+  }
+  disk_write_with_cache(idx_lv1, buf);
+
+//  printf("installing sector finished\n");
+//  dump_idx(idx_lv1, end);
+  return true;
+}
+
+static void
+destroy_sector(struct inode *inode)
+{
+  off_t length = inode->length;
+  int sectors = bytes_to_sectors(length);
+  int lv1_num = DIV_ROUND_UP(sectors, 128);
+
+  int i, j;
+  disk_sector_t buf[128];
+  disk_read_with_cache(inode->idx_lv1, buf);
+  for(i = 0; i < lv1_num; i++)
+  {
+    disk_sector_t buf2[128];
+    disk_read_with_cache(buf[i], buf2);
+    j = 0;
+    while(j < 128 && sectors > 0)
+    {
+      free_map_release(buf2[j], 1);
+      j++;
+      sectors--;
+    }
+    free_map_release(buf[i], 1);
+    i++;
+  }
+  free_map_release(inode->idx_lv1, 1);
+  free_map_release(inode->sector, 1);
+}
+
+static void
+dump_idx(disk_sector_t idx_lv1, off_t length)
+{
+  disk_sector_t buf[128];
+  disk_read_with_cache(idx_lv1, buf);
+  int i, j;
+  printf("==================================\n");
+  for(i = 0; i < 8; i++){
+    for(j = 0; j < 16; j++){
+      printf("%d ", buf[16*i + j]);
+    }
+    printf("\n");
+  }
+  printf("==================================\n");
+
+  int k, max_idx1 = DIV_ROUND_UP(bytes_to_sectors(length), 128);
+  disk_sector_t buf2[128];
+  for(k = 0; k < max_idx1; k++)
+  {
+    disk_read_with_cache(buf[k], buf2);
+    printf("=============  at %d  ============\n", buf[k]);
+    for(i = 0; i < 8; i++){
+      for(j = 0; j < 16; j++){
+        printf("%d ", buf2[16*i + j]);
+      }
+      printf("\n");
+    }
+    printf("==================================\n");
+  }
+}
+
