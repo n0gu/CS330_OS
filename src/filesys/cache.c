@@ -73,13 +73,13 @@ cache_find(disk_sector_t sec_no)
 static void
 cache_read(struct cache_entry *cache, void *buffer)
 {
-  memcpy(buffer, &cache->data, 512);
+  memcpy(buffer, cache->data, 512);
 }
 
 static void
 cache_write(struct cache_entry *cache, const void *buffer)
 {
-  memcpy(&cache->data, buffer, 512);
+  memcpy(cache->data, buffer, 512);
   cache->dirty = true;
 }
 
@@ -104,7 +104,7 @@ disk_io_helper(disk_sector_t sec_no, void *buffer, bool read)
       c->sector = sec_no;
       lock_release(&cache_lock);
       if(c->dirty)
-        disk_write(filesys_disk, old_sector, &c->data);
+        disk_write(filesys_disk, old_sector, c->data);
     }
     else{
       c = (struct cache_entry *)malloc(sizeof(struct cache_entry));
@@ -116,7 +116,7 @@ disk_io_helper(disk_sector_t sec_no, void *buffer, bool read)
       lock_release(&cache_lock);
     }
     c->dirty = false;
-    disk_read(filesys_disk, c->sector, &c->data);
+    disk_read(filesys_disk, c->sector, c->data);
   }
   if(read)
     cache_read(c, buffer);
@@ -145,7 +145,7 @@ flush_cache(void)
     struct list_elem *e = list_pop_front(&caches);
     struct cache_entry *c = list_entry(e, struct cache_entry, elem);
     if(c->dirty)
-      disk_write(filesys_disk, c->sector, &c->data);
+      disk_write(filesys_disk, c->sector, c->data);
     free(c);
   }
   lock_release(&cache_lock);
@@ -155,7 +155,6 @@ flush_cache(void)
 void
 send_request(disk_sector_t sec_no)
 {
-// printf("sending reques to %d\n", sec_no);
   struct request_entry *r;
   struct list_elem *e;
   lock_acquire(&request_lock);
@@ -205,7 +204,6 @@ read_ahead(struct request_entry *r)
 {
   disk_sector_t sec_no = r->sector;
   lock_acquire(&cache_lock);
-//  printf("reading ahead %d, current length %d\n", sec_no, req_cnt);
   struct cache_entry *c = cache_find(sec_no);
   if(c){
     lock_release(&cache_lock);
@@ -219,7 +217,7 @@ read_ahead(struct request_entry *r)
       c->sector = sec_no;
       lock_release(&cache_lock);
       if(c->dirty)
-        disk_write(filesys_disk, old_sector, &c->data);
+        disk_write(filesys_disk, old_sector, c->data);
     }
     else{
       c = (struct cache_entry *)malloc(sizeof(struct cache_entry));
@@ -231,7 +229,7 @@ read_ahead(struct request_entry *r)
       lock_release(&cache_lock);
     }
     c->dirty = false;
-    disk_read(filesys_disk, c->sector, &c->data);
+    disk_read(filesys_disk, c->sector, c->data);
     lock_release(&c->entry_lock);
   }
   free(r);

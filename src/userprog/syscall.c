@@ -363,7 +363,7 @@ sys_tell(int fd)
   struct thread_filesys *tf = lookup_fd(t, fd);
   if(tf){
     lock_acquire(&file_lock);
-    result = file_tell(fd);
+    result = file_tell(tf->file);
     lock_release(&file_lock);
   }
   else
