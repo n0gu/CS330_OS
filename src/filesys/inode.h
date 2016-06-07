@@ -7,6 +7,22 @@
 #include "devices/disk.h"
 
 struct bitmap;
+
+/* Identifies an inode. */
+#define INODE_MAGIC 0x494e4f44
+
+/* On-disk inode.
+   Must be exactly DISK_SECTOR_SIZE bytes long. */
+struct inode_disk
+  {
+    disk_sector_t idx_lv1;              /* Location of index block level 1. */
+    off_t length;                       /* File size in bytes. */
+//    bool is_dir;
+//    disk_sector_t parent;
+    unsigned magic;                     /* Magic number. */
+    uint32_t unused[125];               /* Not used. */
+  };
+
 struct inode
   {
     struct list_elem elem;              /* Element in inode list. */

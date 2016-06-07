@@ -10,20 +10,6 @@
 #include "threads/malloc.h"
 #include "threads/synch.h"
 
-/* Identifies an inode. */
-#define INODE_MAGIC 0x494e4f44
-
-/* On-disk inode.
-   Must be exactly DISK_SECTOR_SIZE bytes long. */
-struct inode_disk
-  {
-    disk_sector_t idx_lv1;              /* Location of index block level 1. */
-    off_t length;                       /* File size in bytes. */
-//    bool is_dir;
-//    disk_sector_t parent_dir_sec;
-    unsigned magic;                     /* Magic number. */
-    uint32_t unused[125];               /* Not used. */
-  };
 
 /* Returns the number of sectors to allocate for an inode SIZE
    bytes long. */
@@ -65,12 +51,14 @@ byte_to_sector (const struct inode *inode, off_t pos)
 /* List of open inodes, so that opening a single inode twice
    returns the same `struct inode'. */
 static struct list open_inodes;
+static struct lock inode_lock;
 
 /* Initializes the inode module. */
 void
 inode_init (void) 
 {
   list_init (&open_inodes);
+  lock_init (&inode_lock);
 }
 
 /* Initializes an inode with LENGTH bytes of data and
@@ -121,6 +109,7 @@ inode_open (disk_sector_t sector)
   struct inode *inode;
   struct inode_disk d;
 
+  lock_acquire(&inode_lock);
   /* Check whether this inode is already open. */
   for (e = list_begin (&open_inodes); e != list_end (&open_inodes);
        e = list_next (e)) 
@@ -129,6 +118,7 @@ inode_open (disk_sector_t sector)
       if (inode->sector == sector) 
         {
           inode_reopen (inode);
+          lock_release(&inode_lock);
           return inode; 
         }
     }
@@ -152,6 +142,7 @@ inode_open (disk_sector_t sector)
   lock_init(&inode->lock);
   sema_init(&inode->in_read, 1);
   inode->read_cnt = 0;
+  lock_release(&inode_lock);
   return inode;
 }
 
@@ -159,8 +150,11 @@ inode_open (disk_sector_t sector)
 struct inode *
 inode_reopen (struct inode *inode)
 {
-  if (inode != NULL)
+  if (inode != NULL){
+    lock_acquire(&inode->lock);
     inode->open_cnt++;
+    lock_release(&inode->lock);
+  }
   return inode;
 }
 
@@ -181,7 +175,12 @@ inode_close (struct inode *inode)
   if (inode == NULL)
     return;
   /* Release resources if this was the last opener. */
-  if (--inode->open_cnt == 0)
+
+  lock_acquire(&inode_lock);
+  lock_acquire(&inode->lock);
+  int open_cnt = --inode->open_cnt;
+  lock_release(&inode->lock);
+  if (open_cnt == 0)
     {
       /* Remove from inode list and release lock. */
       list_remove (&inode->elem);
@@ -193,6 +192,7 @@ inode_close (struct inode *inode)
         }
       free (inode); 
     }
+  lock_release(&inode_lock);
 }
 
 /* Marks INODE to be deleted when it is closed by the last caller who
@@ -374,7 +374,9 @@ inode_allow_write (struct inode *inode)
 {
   ASSERT (inode->deny_write_cnt > 0);
   ASSERT (inode->deny_write_cnt <= inode->open_cnt);
+  lock_acquire(&inode->lock);
   inode->deny_write_cnt--;
+  lock_release(&inode->lock);
 }
 
 /* Returns the length, in bytes, of INODE's data. */
@@ -392,7 +394,7 @@ install_sector(disk_sector_t idx_lv1, off_t start, off_t end)
   /* inode's index block level 1 should be already exist */
   /* start = previous length, end = new length ex) 0, 143 */
   ASSERT(start <= end);
- 
+
   disk_sector_t start_sectors = bytes_to_sectors(start);
   disk_sector_t end_sectors = bytes_to_sectors(end);
 
