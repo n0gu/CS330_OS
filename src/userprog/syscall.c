@@ -12,11 +12,12 @@
 #include "lib/user/syscall.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
+#include "filesys/inode.h"
+#include "filesys/directory.h"
 #include "vm/frame.h"
 #include "vm/page.h"
 #include "vm/swap.h"
 
-struct lock file_lock;
 static inline uint32_t nth_arg(struct intr_frame *f, int n);
 static inline bool is_valid(void *pointer);
 static inline void bad_esp_filter(struct intr_frame *f, int num_of_arg);
@@ -35,6 +36,11 @@ static int sys_write(int, const void *, unsigned);
 static void sys_seek(int, unsigned);
 static unsigned sys_tell(int);
 static void sys_close(int);
+static bool sys_chdir(const char *);
+static bool sys_mkdir(const char *);
+static bool sys_readdir(int, char *);
+static bool sys_isdir(int);
+static int sys_inumber(int);
 static mapid_t sys_mmap(int, void *);
 static void sys_munmap(mapid_t);
 static struct thread_filesys *lookup_fd(struct thread *, int);
@@ -43,7 +49,6 @@ static struct thread_mmap *lookup_mapid(struct thread *, mapid_t);
 void
 syscall_init (void)
 {
-  lock_init(&file_lock);
   intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
 }
 
@@ -157,6 +162,37 @@ syscall_handler (struct intr_frame *f)
       sys_munmap(mapid);
       break;
 
+    case SYS_CHDIR:
+      bad_esp_filter(f, 1);
+      file = nth_arg(f, 1);
+      f->eax = sys_chdir(file);
+      break;
+
+    case SYS_MKDIR:
+      bad_esp_filter(f, 1);
+      file = nth_arg(f, 1);
+      f->eax = sys_mkdir(file);
+      break;
+
+    case SYS_READDIR:
+      bad_esp_filter(f, 2);
+      fd = nth_arg(f, 1);
+      buffer = nth_arg(f, 2);
+      f->eax = sys_readdir(fd, buffer);
+      break;
+
+    case SYS_ISDIR:
+      bad_esp_filter(f, 1);
+      fd = nth_arg(f, 1);
+      f->eax = sys_isdir(fd);
+      break;
+
+    case SYS_INUMBER:
+      bad_esp_filter(f, 1);
+      fd = nth_arg(f, 1);
+      f->eax = sys_inumber(fd);
+      break;
+
     default:
       NOT_REACHED();
       break;
@@ -193,8 +229,6 @@ sys_halt(void)
 static void
 sys_exit(int status)
 {
-  if(lock_held_by_current_thread(&file_lock))
-      lock_release(&file_lock);
   thread_current()->exit_status = status;
   thread_exit();
 }
@@ -224,9 +258,7 @@ sys_create(const char *file, unsigned initial_size)
   bool create;
 
   if(is_valid(file)){
-    lock_acquire(&file_lock);
     create = filesys_create(file, initial_size);
-    lock_release(&file_lock);
     return create;
   }
   else
@@ -239,9 +271,7 @@ sys_remove(const char *file)
   bool remove;
 
   if(is_valid(file)){
-    lock_acquire(&file_lock);
     remove = filesys_remove(file);
-    lock_release(&file_lock);
     return remove;
   }
   else
@@ -256,15 +286,17 @@ sys_open(const char *file)
     struct thread *t = thread_current();
     struct thread_filesys *tf = malloc(sizeof(struct thread_filesys));
 
-    lock_acquire(&file_lock);
     struct file *of = filesys_open(file);
-    lock_release(&file_lock);
 
     if(of){
       fd = t->maxfd + 1;
       t->maxfd = fd;
       tf->fd = fd;
       tf->file = of;
+      tf->is_dir = file_get_inode(tf->file)->is_dir;
+      if(tf->is_dir) {
+        tf->dir = dir_open(inode_reopen(file_get_inode(tf->file)));
+      }
       list_push_back(&t->open_files, &tf->elem);
     }
     else{
@@ -284,16 +316,15 @@ sys_filesize(int fd)
   struct thread *t = thread_current();
   struct thread_filesys *tf = lookup_fd(t, fd);
   if(tf){
-    lock_acquire(&file_lock);
+    if(tf->is_dir) return -1;
     size = file_length(tf->file);
-    lock_release(&file_lock);
   }
   else
     size = 0;
   return size;
 }
 
-static int
+  static int
 sys_read(int fd, void *buffer, unsigned size)
 {
   int result;
@@ -305,9 +336,8 @@ sys_read(int fd, void *buffer, unsigned size)
       struct thread *t = thread_current();
       struct thread_filesys *tf = lookup_fd(t, fd);
       if(tf){
-        lock_acquire(&file_lock);
+        if(tf->is_dir) return -1;
         result = file_read(tf->file, buffer, size);
-        lock_release(&file_lock);
       }
       else
         result = -1;
@@ -318,7 +348,7 @@ sys_read(int fd, void *buffer, unsigned size)
     sys_exit(-1);
 }
 
-static int
+  static int
 sys_write(int fd, const void *buffer, unsigned size)
 {
   int result;
@@ -330,9 +360,8 @@ sys_write(int fd, const void *buffer, unsigned size)
       struct thread *t = thread_current();
       struct thread_filesys *tf = lookup_fd(t, fd);
       if(tf){
-        lock_acquire(&file_lock);
+        if(tf->is_dir) return -1;
         result = file_write(tf->file, buffer, size);
-        lock_release(&file_lock);
       }
       else
         result = -1;
@@ -343,46 +372,92 @@ sys_write(int fd, const void *buffer, unsigned size)
     sys_exit(-1);
 }
 
-static void
+  static void
 sys_seek(int fd, unsigned position)
 {
   struct thread *t = thread_current();
   struct thread_filesys *tf = lookup_fd(t, fd);
   if(tf){
-    lock_acquire(&file_lock);
+    if(tf->is_dir) return -1;
     file_seek(tf->file, position);
-    lock_release(&file_lock);
   }
 }
 
-static unsigned
+  static unsigned
 sys_tell(int fd)
 {
   unsigned result;
   struct thread *t = thread_current();
   struct thread_filesys *tf = lookup_fd(t, fd);
   if(tf){
-    lock_acquire(&file_lock);
+    if(tf->is_dir) return -1;
     result = file_tell(tf->file);
-    lock_release(&file_lock);
   }
   else
     result = -1;
   return result;
 }
 
-static void
+  static void
 sys_close(int fd)
 {
   struct thread *t = thread_current();
   struct thread_filesys *tf = lookup_fd(t, fd);
   if(tf){
-    lock_acquire(&file_lock);
+    if(tf->is_dir) free(tf->dir);
     file_close(tf->file);
-    lock_release(&file_lock);
     list_remove(&tf->elem);
     free(tf);
   }
+}
+
+  static bool
+sys_chdir(const char *dir)
+{
+  return change_dir(dir);
+}
+
+  static bool
+sys_mkdir(const char *dir)
+{
+  return make_dir(dir);
+}
+
+static bool
+sys_readdir(int fd, char *buffer)
+{
+  if(is_valid(buffer)){
+    struct thread *t = thread_current();
+    struct thread_filesys *tf = lookup_fd(t, fd);
+    if(tf){
+      if(!tf->is_dir) return false;
+      return read_dir(tf->dir, buffer);
+    }
+    else return false;
+  }
+  else return false;
+}
+
+static bool
+sys_isdir(int fd)
+{
+  struct thread *t = thread_current();
+  struct thread_filesys *tf = lookup_fd(t, fd);
+  if(tf){
+    return tf->is_dir;
+  }
+  else return false;
+}
+
+static int
+sys_inumber(int fd)
+{
+  struct thread *t = thread_current();
+  struct thread_filesys *tf = lookup_fd(t, fd);
+  if(tf){
+    return (file_get_inode(tf->file))->sector;
+  }
+  else return -1;
 }
 
 static mapid_t
@@ -401,9 +476,7 @@ sys_mmap(int fd, void *addr)
   struct thread_filesys *tf = lookup_fd(t, fd);
   struct thread_mmap *tm = (struct thread_mmap *)malloc(sizeof(struct thread_mmap));
   tm->mapid = t->max_mapid++;
-  lock_acquire(&file_lock);
   tm->file = file_reopen(tf->file);
-  lock_release(&file_lock);
   tm->start_addr = addr;
   tm->size = filesize;
   list_push_back(&t->mmaps, &tm->elem);
@@ -491,9 +564,7 @@ mmap_free(struct thread_mmap *tm)
     addr += PGSIZE;
     size -= PGSIZE;
   }
-  lock_acquire(&file_lock);
   file_close(tm->file);
-  lock_release(&file_lock);
 }
 
 void
@@ -502,9 +573,7 @@ file_out(struct spte *spte)
   ASSERT(frame_lock_held_by_curr());
   ASSERT(spte->frame_entry != NULL);
 
-  lock_acquire(&file_lock);
   file_write_at(spte->file, spte->frame_entry->frame_addr, spte->read_bytes, spte->ofs);
-  lock_release(&file_lock);
 }
 
 void
@@ -512,7 +581,5 @@ file_in(struct spte *spte, struct frame_entry *f)
 {
   ASSERT(frame_lock_held_by_curr());
 
-  lock_acquire(&file_lock);
   file_read_at(spte->file, f->frame_addr, spte->read_bytes, spte->ofs);
-  lock_release(&file_lock);
 }

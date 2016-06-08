@@ -4,7 +4,10 @@
 #include <list.h>
 #include "filesys/filesys.h"
 #include "filesys/inode.h"
+#include "filesys/cache.h"
+#include "filesys/free-map.h"
 #include "threads/malloc.h"
+#include "threads/thread.h"
 
 /* A directory. */
 struct dir 
@@ -24,9 +27,16 @@ struct dir_entry
 /* Creates a directory with space for ENTRY_CNT entries in the
    given SECTOR.  Returns true if successful, false on failure. */
 bool
-dir_create (disk_sector_t sector, size_t entry_cnt) 
+dir_create (disk_sector_t sector, size_t entry_cnt, disk_sector_t parent)
 {
-  return inode_create (sector, entry_cnt * sizeof (struct dir_entry));
+  bool success = inode_create (sector, entry_cnt * sizeof (struct dir_entry), true);
+  if(success){
+    struct dir *dir = dir_open(inode_open(sector));
+    dir_add(dir, ".", sector);
+    dir_add(dir, "..", parent);
+    dir_close(dir);
+  }
+  return success;
 }
 
 /* Opens and returns the directory for the given INODE, of which
@@ -35,7 +45,7 @@ struct dir *
 dir_open (struct inode *inode) 
 {
   struct dir *dir = calloc (1, sizeof *dir);
-  if (inode != NULL && dir != NULL)
+  if (inode != NULL && dir != NULL && inode->is_dir)
     {
       dir->inode = inode;
       dir->pos = 0;
@@ -124,6 +134,11 @@ dir_lookup (const struct dir *dir, const char *name,
   ASSERT (dir != NULL);
   ASSERT (name != NULL);
 
+  if(name[0] == '\0'){
+    *inode = inode_reopen(dir->inode);
+    return inode != NULL;
+  }
+
   if (lookup (dir, name, &e, NULL))
     *inode = inode_open (e.inode_sector);
   else
@@ -147,6 +162,9 @@ dir_add (struct dir *dir, const char *name, disk_sector_t inode_sector)
   
   ASSERT (dir != NULL);
   ASSERT (name != NULL);
+
+  if(dir->inode->removed)
+    return false;
 
   /* Check NAME for validity. */
   if (*name == '\0' || strlen (name) > NAME_MAX)
@@ -173,7 +191,17 @@ dir_add (struct dir *dir, const char *name, disk_sector_t inode_sector)
   strlcpy (e.name, name, sizeof e.name);
   e.inode_sector = inode_sector;
   success = inode_write_at (dir->inode, &e, sizeof e, ofs) == sizeof e;
-
+  if(success){
+    lock_acquire(&dir->inode->lock);
+    struct inode_disk *d = malloc(sizeof(struct inode_disk));
+    if(d == NULL) PANIC("malloc fail at dir_add");
+    disk_read_with_cache(dir->inode->sector, d);
+    d->entry_cnt++;
+    disk_write_with_cache(dir->inode->sector, d);
+    dir->inode->entry_cnt++;
+    lock_release(&dir->inode->lock);
+    free(d);
+  }
  done:
   return success;
 }
@@ -201,6 +229,9 @@ dir_remove (struct dir *dir, const char *name)
   if (inode == NULL)
     goto done;
 
+  if(inode->is_dir && inode->entry_cnt > 2)
+    goto done;
+
   /* Erase directory entry. */
   e.in_use = false;
   if (inode_write_at (dir->inode, &e, sizeof e, ofs) != sizeof e) 
@@ -209,6 +240,19 @@ dir_remove (struct dir *dir, const char *name)
   /* Remove inode. */
   inode_remove (inode);
   success = true;
+  struct inode_disk *d = malloc(sizeof(struct inode_disk));
+  if(d == NULL) PANIC("malloc fail at dir_remove");
+  disk_read_with_cache(dir->inode->sector, d);
+  d->entry_cnt--;
+  disk_write_with_cache(dir->inode->sector, d);
+  dir->inode->entry_cnt--;
+  free(d);
+
+  if(inode->is_dir){
+    struct dir_entry erase_rel = {0,};
+    inode_write_at(inode, &erase_rel, sizeof e, 0);
+    inode_write_at(inode, &erase_rel, sizeof e, sizeof e);
+  }
 
  done:
   inode_close (inode);
@@ -233,4 +277,102 @@ dir_readdir (struct dir *dir, char name[NAME_MAX + 1])
         } 
     }
   return false;
+}
+
+
+struct dir *
+dir_open_path(const char *dir, char *fname_save)
+{
+  if(strlen(dir) == 0) return NULL;
+//  printf("@dir_open_path: full path name %s\n", dir);
+  struct thread *curr = thread_current();
+  struct dir *path;
+
+  char dir_copy[PATH_MAX + 1];
+  strlcpy(dir_copy, dir, PATH_MAX + 1);
+  if(dir_copy[0] == '/')
+    path = dir_open_root();
+  else
+    path = curr->wd ? dir_reopen(curr->wd) : dir_open_root();
+
+  int i;
+  for(i = strlen(dir_copy); i >= 0; i--){
+    if(dir_copy[i] == '/'){
+      dir_copy[i] = '\0';
+      break;
+    }
+  }
+
+  if(strlen(&dir_copy[i + 1]) > NAME_MAX) return NULL;
+
+  strlcpy(fname_save, &dir_copy[i + 1], NAME_MAX);
+  if(i == -1){
+//    printf("@dir_open_path: no slash_single word input %s\n", &dir_copy[i + 1]);
+    return path;
+  }
+
+//  printf("@dir_open_path: pathname %s, filename %s\n", dir_copy, &dir_copy[i + 1]);
+  char *token, *save_ptr;
+  for(token = strtok_r(dir_copy, "/", &save_ptr); token != NULL; token = strtok_r(NULL, "/", &save_ptr)){
+    struct inode *inode;
+    bool success = dir_lookup(path, token, &inode);
+    dir_close(path);
+    path = dir_open(inode);
+    if(path == NULL) return NULL;
+  }
+  return path;
+}
+
+bool
+change_dir(const char *dir)
+{
+  struct thread *curr = thread_current();
+  char dirname[NAME_MAX + 1];
+  struct dir *path = dir_open_path(dir, dirname);
+  struct inode *inode;
+
+  bool success = (path != NULL
+                  && dir_lookup(path, dirname, &inode)
+                  && inode->is_dir);
+  if(success){
+    dir_close(curr->wd);
+    curr->wd = dir_open(inode);
+  }
+
+  return success;
+}
+
+bool
+make_dir(const char *dir)
+{
+//  printf("@make_dir: full path %s\n", dir);
+  char name[NAME_MAX + 1];
+  struct dir *path = dir_open_path(dir, name);
+//  printf("@make_dir: name %s\n", name);
+  disk_sector_t inode_sector = 0;
+
+  bool success = (path != NULL
+                  && free_map_allocate (1, &inode_sector)
+                  && dir_create(inode_sector, 16, path->inode->sector)
+                  && dir_add (path, name, inode_sector));
+  if (!success && inode_sector != 0)
+    free_map_release (inode_sector, 1);
+  dir_close (path);
+
+//  printf("@make_dir: finished\n");
+  return success;
+}
+
+bool
+read_dir(struct dir *dir, char *name)
+{
+  char save[NAME_MAX +1];
+  bool success;
+  while(success = dir_readdir(dir, save)){
+    if(strcmp(save, ".") != 0 && strcmp(save, "..") != 0)
+      break;
+  }
+  if(success) strlcpy(name, save, NAME_MAX + 1);
+
+  return success;
 }

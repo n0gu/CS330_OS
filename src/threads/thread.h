@@ -115,6 +115,9 @@ struct thread
     struct list mmaps;
     int max_mapid;
 #endif
+#ifdef FILESYS
+    struct dir *wd;
+#endif
     /* Owned by thread.c. */
     unsigned magic;                     /* Detects stack overflow. */
   };
@@ -122,7 +125,9 @@ struct thread
 struct thread_filesys
   {
     int fd;
+    bool is_dir;
     struct file *file;
+    struct dir *dir;
     struct list_elem elem;
   };
 

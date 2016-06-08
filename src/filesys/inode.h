@@ -17,10 +17,10 @@ struct inode_disk
   {
     disk_sector_t idx_lv1;              /* Location of index block level 1. */
     off_t length;                       /* File size in bytes. */
-//    bool is_dir;
-//    disk_sector_t parent;
+    bool is_dir;
+    int entry_cnt;
     unsigned magic;                     /* Magic number. */
-    uint32_t unused[125];               /* Not used. */
+    uint32_t unused[123];               /* Not used. */
   };
 
 struct inode
@@ -35,12 +35,12 @@ struct inode
     struct lock lock;
     struct semaphore in_read;
     int read_cnt;
-//    bool is_dir;
-//    disk_sector_t parent_dir_sec;
+    bool is_dir;
+    int entry_cnt;
   };
 
 void inode_init (void);
-bool inode_create (disk_sector_t, off_t);
+bool inode_create (disk_sector_t, off_t, bool);
 struct inode *inode_open (disk_sector_t);
 struct inode *inode_reopen (struct inode *);
 disk_sector_t inode_get_inumber (const struct inode *);

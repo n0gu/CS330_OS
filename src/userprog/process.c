@@ -85,9 +85,9 @@ start_process (void *cmd_line)
     sema_up(&curr->parent->child_create_fin);
     thread_exit ();
   }
-  /* else re-open it, and deny writes. */
   else{
     palloc_free_page(cmd_line);
+    curr->wd = (curr->parent->wd) ? dir_reopen(curr->parent->wd) : dir_open_root();
     sema_up(&curr->parent->child_create_fin);
   }
   /* Start the user process by simulating a return from an
@@ -183,6 +183,8 @@ process_exit (void)
   int status = curr->exit_status;
 
   file_close(curr->exec);
+  dir_close(curr->wd);
+
   frame_lock_ac();
   while(!list_empty(&curr->mmaps)){
     struct list_elem *e = list_pop_front(&curr->mmaps);
@@ -193,6 +195,7 @@ process_exit (void)
   while(!list_empty(&curr->open_files)){
     struct list_elem *e = list_pop_front(&curr->open_files);
     struct thread_filesys *tf = list_entry(e, struct thread_filesys, elem);
+    if(tf->is_dir) free(tf->dir);
     file_close(tf->file);
     free(tf);
   }
