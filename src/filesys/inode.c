@@ -183,12 +183,15 @@ inode_close (struct inode *inode)
     return;
   /* Release resources if this was the last opener. */
 
+  lock_acquire(&inode_lock);
+  lock_acquire(&inode->lock);
   int open_cnt = --inode->open_cnt;
+  lock_release(&inode->lock);
   if (open_cnt == 0)
     {
       /* Remove from inode list and release lock. */
       list_remove (&inode->elem);
- 
+      lock_release(&inode_lock);
       /* Deallocate blocks if removed. */
       if (inode->removed) 
         {
@@ -196,6 +199,8 @@ inode_close (struct inode *inode)
         }
       free (inode); 
     }
+  else
+    lock_release(&inode_lock);
 }
 
 /* Marks INODE to be deleted when it is closed by the last caller who
@@ -370,7 +375,9 @@ inode_write_at (struct inode *inode, const void *buffer_, off_t size,
 void
 inode_deny_write (struct inode *inode) 
 {
+  lock_acquire(&inode->lock);
   inode->deny_write_cnt++;
+  lock_release(&inode->lock);
   ASSERT (inode->deny_write_cnt <= inode->open_cnt);
 }
 
