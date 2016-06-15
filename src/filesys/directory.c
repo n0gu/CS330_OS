@@ -163,8 +163,8 @@ dir_add (struct dir *dir, const char *name, disk_sector_t inode_sector)
   ASSERT (dir != NULL);
   ASSERT (name != NULL);
 
-  if(dir->inode->removed)
-    return false;
+/*  if(dir->inode->removed)
+    return false;*/
 
   /* Check NAME for validity. */
   if (*name == '\0' || strlen (name) > NAME_MAX)
@@ -248,11 +248,11 @@ dir_remove (struct dir *dir, const char *name)
   dir->inode->entry_cnt--;
   free(d);
 
-  if(inode->is_dir){
+/*  if(inode->is_dir){
     struct dir_entry erase_rel = {0,};
     inode_write_at(inode, &erase_rel, sizeof e, 0);
     inode_write_at(inode, &erase_rel, sizeof e, sizeof e);
-  }
+  }*/
 
  done:
   inode_close (inode);
@@ -294,6 +294,11 @@ dir_open_path(const char *dir, char *fname_save)
     path = dir_open_root();
   else
     path = curr->wd ? dir_reopen(curr->wd) : dir_open_root();
+
+  if(path->inode->removed){
+    dir_close(path);
+    return NULL;
+  }
 
   int i;
   for(i = strlen(dir_copy); i >= 0; i--){
